@@ -1,0 +1,10 @@
+cff-version: 1.2.0
+message: "If you use schlda, please cite it as below."
+title: "schlda: hierarchical LDA for annotated single-cell count data"
+authors:
+  - family-names: Sampson
+    given-names: Mark
+version: 0.2.0
+date-released: 2026-09-10
+license: MIT
+repository-code: "https://github.com/sampson-m/schlda"

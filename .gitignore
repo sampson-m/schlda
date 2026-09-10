@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.eggs/
+
+# Environments and secrets
+venv/
+.venv/
+env/
+.env
+
+# Tooling
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.idea/
+.vscode/
+.ipynb_checkpoints
+.claude/
+CLAUDE.md
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Data and outputs
+*.csv
+*.h5ad
+*.h5
+*.memmap
+*.npy
+*.npz
+*.log
+vignette_out/
+schlda_output/
