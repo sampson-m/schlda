@@ -19,6 +19,8 @@ jobs:
       - run: pip install -e ".[dev]"
       - run: flake8 schlda examples tests
       - run: pytest -q
+        env:
+          NUMBA_NUM_THREADS: "2"
       - run: python examples/vignette.py vignette_out
         env:
           MPLBACKEND: Agg

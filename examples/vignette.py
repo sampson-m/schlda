@@ -104,6 +104,27 @@ print(f"\n{res}")
 print(f"identity topics: {res.identity_topics}")
 print(f"activity topics: {res.activity_topics}\n")
 
+# ── 3b. The same fit, in parallel and with the depth-scaled prior ──────────
+# fit_hlda_parallel returns the same object. n_threads splits the cells into
+# blocks swept concurrently; prior_scale=0.1 gives every cell a prior of
+# 0.1 x its token count, 70 % of it on the identity topic.
+
+res_par = schlda.fit_hlda_parallel(
+    adata,
+    "cell_type",
+    n_activity_topics=1,
+    layer="counts",
+    output_dir=OUT / "parallel",
+    n_loops=600,
+    burn_in=300,
+    thin=10,
+    seed=0,
+    n_threads=2,
+    prior_scale=0.1,
+    identity_share=0.7,
+)
+print(f"\nparallel fit: {res_par}  ({res_par.params['seconds_per_sweep']:.3f} s/sweep)")
+
 # ── 4. Inspect ─────────────────────────────────────────────────────────────
 # beta is genes x topics: the top genes of a topic say what it represents.
 
@@ -162,11 +183,12 @@ for i, (name, w) in enumerate(zip(labels, true_stress)):
     truth.iloc[i, -1] = w
 
 order = schlda.cell_order(res)
-fig, axes = plt.subplots(2, 1, figsize=(9, 6), sharex=True)
+fig, axes = plt.subplots(3, 1, figsize=(9, 9), sharex=True)
 schlda.structure_plot(res, order=order, ax=axes[0], title="HLDA fit", legend=False)
+schlda.structure_plot(res_par, order=order, ax=axes[1], title="parallel fit, depth-scaled prior", legend=False)
 schlda.structure_plot(
     truth, cell_types=adata.obs["cell_type"], activity_topics=["stress"],
-    order=order, ax=axes[1], title="simulation truth",
+    order=order, ax=axes[2], title="simulation truth",
 )
 fig.savefig(OUT / "structure_compare.png", dpi=150, bbox_inches="tight")
 

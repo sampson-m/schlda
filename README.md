@@ -101,6 +101,70 @@ to use.
 Pass `seed` for reproducibility: the compiled kernel keeps its own RNG state, so
 without it neither the initialisation nor the chain repeats.
 
+## Parallel sampler and identity prior
+
+`fit_hlda_parallel` takes every argument of `fit_hlda`, returns the same
+`HLDAResult`, writes the same files and annotates the AnnData under the same
+keys. It adds two things.
+
+```python
+res = schlda.fit_hlda_parallel(
+    adata, "cell_type", n_activity_topics=2, layer="counts",
+    output_dir="results/pbmc_par", seed=0,
+    n_threads=4,            # cells are split into 4 blocks, one thread each
+    prior_scale=0.1,        # depth-scaled theta prior (see below); None = fixed alpha_c
+    identity_share=0.7,     # prior mean of each cell's identity share
+)
+```
+
+### Threads
+
+With `n_threads=1` the sampler is the exact collapsed Gibbs sampler. With
+`n_threads=P` the cells are split into `P` contiguous blocks balanced by token
+count; each block is swept by one thread that updates its own cells' topic
+counts in place and works from a private copy of the gene-topic table, and the
+per-block changes to the gene-topic table are merged after every sweep. This is
+the distributed scheme of Newman et al. (2009): the within-sweep dependence
+between blocks is dropped, which is negligible when every block holds many
+cells. Every block reseeds from `(seed, sweep, block)`, so a run repeats
+exactly for a fixed `seed` and `n_threads`; changing `n_threads` changes the
+draws. `n_threads` is capped at Numba's thread limit (`NUMBA_NUM_THREADS`).
+
+### Depth-scaled theta prior
+
+The fixed prior of `fit_hlda` puts the same concentration `alpha_c` on every
+topic, so with deep cells the prior is a few pseudo-counts against hundreds or
+thousands of tokens and has no say in how much of a cell stays in its identity
+topic. `prior_scale` ties the prior to each cell's depth. With `L_i` the number
+of tokens (UMIs) in cell `i`, `m` activity topics, `s = identity_share` and
+`kappa = prior_scale`,
+
+```
+alpha_i,identity = s * kappa * L_i
+alpha_i,activity = (1 - s) * kappa * L_i / m        (each activity topic)
+```
+
+so the prior mean of the identity share is `s` at every depth and the prior
+strength is `kappa * L_i` pseudo-counts. Example: `L_i = 1000`, `m = 2`,
+`s = 0.7`, `kappa = 0.1` gives `alpha_i = (70, 15, 15)` on (identity, V1, V2).
+A priori the identity share is `Beta(s * kappa * L_i, (1 - s) * kappa * L_i)`;
+at `kappa = 0.1` and `L_i = 600` the prior probability of an identity share
+below 0.4 is about 1e-6, so cells leave their identity topic only when their
+counts insist. Nothing is truncated: the estimator is still the pooled
+empirical frequency of the retained assignments, and the prior acts through the
+token conditional, which gains a cell index on `alpha`. `prior_scale=None`
+(default) reproduces the fixed prior; `prior_scale` and `alpha_c` /
+`alpha_c_identity` cannot be combined.
+
+| argument | default | meaning |
+| --- | --- | --- |
+| `n_threads` | 1 | threads, and cell blocks, per sweep |
+| `prior_scale` | `None` | `kappa`: prior pseudo-counts per cell as a fraction of its tokens |
+| `identity_share` | 0.7 | prior mean of the identity share under `prior_scale` |
+| `report_every` | 100 | sweeps between progress lines |
+
+`res.params["seconds_per_sweep"]` records the measured cost.
+
 ## Plot
 
 ```python
