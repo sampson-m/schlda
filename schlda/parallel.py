@@ -9,8 +9,11 @@ object, AnnData keys and output files:
   alpha_i = prior_scale * L_i (L_i = the cell's token count), split
   identity_share : (1 - identity_share) between the identity topic and the
   activity topics (equally). The prior mean of the identity share is then
-  ``identity_share`` at every depth. Unset = the fixed ``alpha_c`` /
-  ``alpha_c_identity`` prior of ``fit_hlda``.
+  ``identity_share`` at every depth.
+* ``prior_scale_identity``: identity-only version, alpha_i,identity =
+  prior_scale_identity * L_i while the activity topics keep ``alpha_c``.
+  Unset (both) = the fixed ``alpha_c`` / ``alpha_c_identity`` prior of
+  ``fit_hlda``.
 """
 
 from __future__ import annotations
@@ -29,12 +32,18 @@ __all__ = ["fit_hlda_parallel", "prior_concentrations"]
 
 
 def prior_concentrations(tokens_per_cell, n_identity, n_activity, *, identity_share=0.7,
-                         prior_scale=0.1, alpha_c=None, alpha_c_identity=None):
-    """Cells x topics concentration matrix. Depth-scaled when ``prior_scale`` is set, else fixed."""
+                         prior_scale=0.1, prior_scale_identity=None, alpha_c=None, alpha_c_identity=None):
+    """Cells x topics concentration matrix: depth-scaled (``prior_scale``), identity-only depth-scaled
+    (``prior_scale_identity``) or fixed."""
     n_cells = len(tokens_per_cell)
     K = n_identity + n_activity
     alpha = np.empty((n_cells, K), dtype=np.float64)
-    if prior_scale is not None:
+    if prior_scale_identity is not None:
+        if prior_scale_identity <= 0:
+            raise ValueError("prior_scale_identity must be positive.")
+        alpha[:, :] = 0.1 if alpha_c is None else float(alpha_c)
+        alpha[:, :n_identity] = (prior_scale_identity * np.asarray(tokens_per_cell, dtype=np.float64))[:, None]
+    elif prior_scale is not None:
         if not 0.0 < identity_share < 1.0:
             raise ValueError("identity_share must be in (0, 1).")
         if prior_scale <= 0:
@@ -65,6 +74,7 @@ def fit_hlda_parallel(
     alpha_c_identity=None,
     identity_share=0.7,
     prior_scale=None,
+    prior_scale_identity=None,
     n_threads=1,
     seed=None,
     key_added="schlda",
@@ -85,6 +95,10 @@ def fit_hlda_parallel(
         raise ValueError(f"init must be 'data_driven' or 'random', got {init!r}.")
     if prior_scale is not None and (alpha_c is not None or alpha_c_identity is not None):
         raise ValueError("Give either prior_scale (depth-scaled prior) or alpha_c/alpha_c_identity, not both.")
+    if prior_scale is not None and prior_scale_identity is not None:
+        raise ValueError("Give either prior_scale or prior_scale_identity, not both.")
+    if prior_scale_identity is not None and alpha_c_identity is not None:
+        raise ValueError("prior_scale_identity replaces alpha_c_identity.")
 
     counts = _get_counts(adata, layer)
     labels = _get_labels(adata, cell_type_key)
@@ -124,7 +138,8 @@ def fit_hlda_parallel(
     cell_offsets = _gibbs_blocked.cell_offsets_from_idx(cell_idx, n_cells)
     tokens_per_cell = np.diff(cell_offsets)
     alpha = prior_concentrations(tokens_per_cell, n_identity, n_activity, identity_share=identity_share,
-                                 prior_scale=prior_scale, alpha_c=alpha_c, alpha_c_identity=alpha_c_identity)
+                                 prior_scale=prior_scale, prior_scale_identity=prior_scale_identity,
+                                 alpha_c=alpha_c, alpha_c_identity=alpha_c_identity)
     valid_topics, valid_offsets = _gibbs_blocked.build_valid(n_identity, n_activity)
     block_bounds = _gibbs_blocked.make_blocks(cell_offsets, n_threads)
     n_blocks = block_bounds.shape[0] - 1
@@ -138,6 +153,9 @@ def fit_hlda_parallel(
         if prior_scale is not None:
             print(f"[schlda] prior: alpha_i = {prior_scale} * L_i, identity share {identity_share} "
                   f"(median L_i {np.median(tokens_per_cell):.0f})")
+        elif prior_scale_identity is not None:
+            print(f"[schlda] prior: alpha_identity = {prior_scale_identity} * L_i, activity alpha_c "
+                  f"{0.1 if alpha_c is None else alpha_c} (median L_i {np.median(tokens_per_cell):.0f})")
         print(f"[schlda] Gibbs: n_loops={n_loops} burn_in={burn_in} thin={thin} ({n_save} draws kept)")
 
     A_chain, D_chain = _gibbs.open_chains(sample_dir, n_save, n_genes, n_cells, n_topics)
@@ -168,11 +186,13 @@ def fit_hlda_parallel(
         "cell_type_key": str(cell_type_key), "layer": "X" if layer is None else str(layer),
         "n_activity_topics": int(n_activity), "init": init, "n_loops": int(n_loops), "burn_in": int(burn_in),
         "thin": int(thin), "n_save": int(n_save), "alpha_beta": float(alpha_beta),
-        "prior": "depth_scaled" if prior_scale is not None else "fixed",
+        "prior": ("depth_scaled" if prior_scale is not None else
+                  "identity_depth_scaled" if prior_scale_identity is not None else "fixed"),
         "identity_share": float(identity_share) if prior_scale is not None else None,
         "prior_scale": None if prior_scale is None else float(prior_scale),
+        "prior_scale_identity": None if prior_scale_identity is None else float(prior_scale_identity),
         "alpha_c": None if prior_scale is not None else float(alpha[0, -1] if n_activity else alpha[0, 0]),
-        "alpha_c_identity": None if prior_scale is not None else float(alpha[0, 0]),
+        "alpha_c_identity": None if (prior_scale is not None or prior_scale_identity is not None) else float(alpha[0, 0]),
         "n_threads": int(n_threads), "n_blocks": int(n_blocks), "sampler": "blocked",
         "n_tokens": int(cell_idx.shape[0]), "seed": chain_seed, "seconds_per_sweep": float(seconds_per_sweep),
     }

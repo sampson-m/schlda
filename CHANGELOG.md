@@ -8,7 +8,8 @@
 - Depth-scaled theta prior: `prior_scale` (kappa) and `identity_share` give each
   cell the concentration kappa * L_i split identity_share : 1 - identity_share
   between its identity topic and the activity topics. `prior_concentrations`
-  builds the cells x topics matrix.
+  builds the cells x topics matrix. `prior_scale_identity` scales only the
+  identity concentration with depth.
 - `fit_hlda`, `_gibbs` and `_init` are unchanged.
 
 ## 0.2.0 — 2026-09-10

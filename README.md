@@ -156,11 +156,17 @@ token conditional, which gains a cell index on `alpha`. `prior_scale=None`
 (default) reproduces the fixed prior; `prior_scale` and `alpha_c` /
 `alpha_c_identity` cannot be combined.
 
+`prior_scale_identity=kappa` is the identity-only version: `alpha_i,identity =
+kappa * L_i` while every activity topic keeps `alpha_c` (0.1). It makes leaving
+the identity topic costly without putting prior mass on the activity topics,
+so cells that carry no activity program are not pushed to use one.
+
 | argument | default | meaning |
 | --- | --- | --- |
 | `n_threads` | 1 | threads, and cell blocks, per sweep |
 | `prior_scale` | `None` | `kappa`: prior pseudo-counts per cell as a fraction of its tokens |
 | `identity_share` | 0.7 | prior mean of the identity share under `prior_scale` |
+| `prior_scale_identity` | `None` | identity-only depth scaling: `alpha_identity = kappa * L_i`, activity topics keep `alpha_c` |
 | `report_every` | 100 | sweeps between progress lines |
 
 `res.params["seconds_per_sweep"]` records the measured cost.

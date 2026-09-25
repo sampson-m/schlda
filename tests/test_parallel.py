@@ -42,6 +42,8 @@ def test_prior_concentrations():
     assert np.allclose(a[0, 0] / (a[0, 0] + a[0, 2:].sum()), 0.7)
     f = prior_concentrations(L, 2, 1, prior_scale=None, alpha_c=0.1, alpha_c_identity=1.0)
     assert np.allclose(f, [[1.0, 1.0, 0.1], [1.0, 1.0, 0.1]])
+    i = prior_concentrations(L, 2, 1, prior_scale=None, prior_scale_identity=0.05)
+    assert np.allclose(i, [[5.0, 5.0, 0.1], [10.0, 10.0, 0.1]])
 
 
 @pytest.mark.parametrize("n_threads", [1, 3])
