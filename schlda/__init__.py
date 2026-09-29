@@ -21,4 +21,4 @@ from .parallel import fit_hlda_parallel
 from .plotting import cell_order, structure_plot, theta_heatmap
 
 __all__ = ["fit_hlda", "fit_hlda_parallel", "HLDAResult", "structure_plot", "theta_heatmap", "cell_order"]
-__version__ = "0.3.0"
+__version__ = "0.3.1"

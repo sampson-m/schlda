@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.1 — 2026-09-29
+
+- `prior_scale_identity` (kappa): identity-only depth-scaled theta prior,
+  alpha_i,identity = kappa * L_i while the activity topics keep `alpha_c`.
+  Pulls each cell toward its identity topic without putting prior mass on the
+  activity topics. Mutually exclusive with `prior_scale` and
+  `alpha_c_identity`.
+
 ## 0.3.0 — 2026-09-24
 
 - New `fit_hlda_parallel`: blocked collapsed Gibbs sampler (`n_threads` cells
@@ -8,8 +16,7 @@
 - Depth-scaled theta prior: `prior_scale` (kappa) and `identity_share` give each
   cell the concentration kappa * L_i split identity_share : 1 - identity_share
   between its identity topic and the activity topics. `prior_concentrations`
-  builds the cells x topics matrix. `prior_scale_identity` scales only the
-  identity concentration with depth.
+  builds the cells x topics matrix.
 - `fit_hlda`, `_gibbs` and `_init` are unchanged.
 
 ## 0.2.0 — 2026-09-10

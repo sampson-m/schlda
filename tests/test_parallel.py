@@ -85,3 +85,18 @@ def test_depth_scaled_prior_raises_identity(tmp_path):
     assert scaled.params["prior"] == "depth_scaled" and fixed.params["prior"] == "fixed"
     with pytest.raises(ValueError):
         schlda.fit_hlda_parallel(a, "cell_type", 1, output_dir=tmp_path / "x", prior_scale=0.1, alpha_c=0.1, **kw)
+
+
+def test_identity_only_prior(tmp_path):
+    a, act, _ = simulate()
+    kw = dict(n_loops=200, burn_in=100, thin=10, seed=3, init="random", verbose=False)
+    fixed = schlda.fit_hlda_parallel(a, "cell_type", 1, output_dir=tmp_path / "f", **kw)
+    r = schlda.fit_hlda_parallel(a, "cell_type", 1, output_dir=tmp_path / "i", prior_scale_identity=0.1, **kw)
+
+    def ident(res):
+        return np.array([res.theta.iloc[i][t] for i, t in enumerate(a.obs["cell_type"].astype(str))])
+    assert ident(r).mean() > ident(fixed).mean()
+    assert r.params["prior"] == "identity_depth_scaled" and r.params["prior_scale_identity"] == 0.1
+    assert cos(r.beta["V1"].to_numpy(), act) > 0.9
+    with pytest.raises(ValueError):
+        schlda.fit_hlda_parallel(a, "cell_type", 1, prior_scale=0.1, prior_scale_identity=0.1, **kw)
