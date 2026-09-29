@@ -104,12 +104,13 @@ print(f"\n{res}")
 print(f"identity topics: {res.identity_topics}")
 print(f"activity topics: {res.activity_topics}\n")
 
-# ── 3b. The same fit, in parallel and with the depth-scaled prior ──────────
-# fit_hlda_parallel returns the same object. n_threads splits the cells into
-# blocks swept concurrently; prior_scale=0.1 gives every cell a prior of
-# 0.1 x its token count, 70 % of it on the identity topic.
+# ── 3b. The same fit on two threads with the depth-scaled identity prior ──
+# n_threads splits the cells into blocks swept concurrently (1 = the exact
+# serial sampler). prior_scale_identity=0.1 gives each cell an identity
+# concentration of 0.1 x its token count; alpha_c / alpha_c_identity also
+# accept one value per cell.
 
-res_par = schlda.fit_hlda_parallel(
+res_par = schlda.fit_hlda(
     adata,
     "cell_type",
     n_activity_topics=1,
@@ -120,10 +121,9 @@ res_par = schlda.fit_hlda_parallel(
     thin=10,
     seed=0,
     n_threads=2,
-    prior_scale=0.1,
-    identity_share=0.7,
+    prior_scale_identity=0.1,
 )
-print(f"\nparallel fit: {res_par}  ({res_par.params['seconds_per_sweep']:.3f} s/sweep)")
+print(f"\ntwo-thread fit: {res_par}  ({res_par.params['seconds_per_sweep']:.3f} s/sweep)")
 
 # ── 4. Inspect ─────────────────────────────────────────────────────────────
 # beta is genes x topics: the top genes of a topic say what it represents.

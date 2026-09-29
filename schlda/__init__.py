@@ -17,8 +17,7 @@ the same way and compared on a shared cell order (see ``cell_order``).
 """
 
 from .model import HLDAResult, fit_hlda
-from .parallel import fit_hlda_parallel
 from .plotting import cell_order, structure_plot, theta_heatmap
 
-__all__ = ["fit_hlda", "fit_hlda_parallel", "HLDAResult", "structure_plot", "theta_heatmap", "cell_order"]
-__version__ = "0.3.1"
+__all__ = ["fit_hlda", "HLDAResult", "structure_plot", "theta_heatmap", "cell_order"]
+__version__ = "0.4.0"

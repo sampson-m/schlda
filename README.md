@@ -63,6 +63,8 @@ topic_info.csv          topic_id, topic_name, topic_type
 samples/A_chain.memmap  (n_save, n_genes, n_topics) int32 gene-topic counts
 samples/D_chain.memmap  (n_save, n_cells, n_topics) int32 cell-topic counts
 samples/samples_meta.json   shapes, topic names, run parameters
+theta_prior.csv         cells x (identity, activity) prior concentrations used
+                        (written when a vector or prior_scale_identity is given)
 ```
 
 Omitting `output_dir` writes to `./schlda_output` and warns. Reload the chains
@@ -93,83 +95,81 @@ to use.
 | `n_loops` | 3000 | total Gibbs sweeps |
 | `burn_in` | 1000 | sweeps discarded |
 | `thin` | 30 | sweeps between kept draws |
+| `n_threads` | 1 | threads per sweep (see [Threads](#threads)) |
 | `alpha_beta` | 0.1 | Dirichlet concentration on gene distributions |
-| `alpha_c` | 0.1 | Dirichlet concentration on activity topic usage |
-| `alpha_c_identity` | `alpha_c` | concentration on identity topic usage |
+| `alpha_c` | 0.1 | activity topic concentration: float or one value per cell (see [Theta prior](#theta-prior)) |
+| `alpha_c_identity` | `alpha_c` | identity topic concentration: float or one value per cell |
+| `prior_scale_identity` | `None` | `kappa`: identity concentration `kappa * L_i`; replaces `alpha_c_identity` |
 | `seed` | `None` | seeds init and the chain |
+| `report_every` | 100 | sweeps between progress lines |
 
-Pass `seed` for reproducibility: the compiled kernel keeps its own RNG state, so
-without it neither the initialisation nor the chain repeats.
-
-## Parallel sampler and identity prior
-
-`fit_hlda_parallel` takes every argument of `fit_hlda`, returns the same
-`HLDAResult`, writes the same files and annotates the AnnData under the same
-keys. It adds two things.
-
-```python
-res = schlda.fit_hlda_parallel(
-    adata, "cell_type", n_activity_topics=2, layer="counts",
-    output_dir="results/pbmc_par", seed=0,
-    n_threads=4,            # cells are split into 4 blocks, one thread each
-    prior_scale=0.1,        # depth-scaled theta prior (see below); None = fixed alpha_c
-    identity_share=0.7,     # prior mean of each cell's identity share
-)
-```
+Pass `seed` for reproducibility. A run repeats exactly for a fixed `seed` and
+`n_threads`; changing `n_threads` changes the draws.
 
 ### Threads
 
-With `n_threads=1` the sampler is the exact collapsed Gibbs sampler. With
+With `n_threads=1` (default) the sampler is the exact collapsed Gibbs sampler:
+every token is resampled in turn, conditional on all others. With
 `n_threads=P` the cells are split into `P` contiguous blocks balanced by token
 count; each block is swept by one thread that updates its own cells' topic
 counts in place and works from a private copy of the gene-topic table, and the
-per-block changes to the gene-topic table are merged after every sweep. This is
-the distributed scheme of Newman et al. (2009): the within-sweep dependence
-between blocks is dropped, which is negligible when every block holds many
-cells. Every block reseeds from `(seed, sweep, block)`, so a run repeats
-exactly for a fixed `seed` and `n_threads`; changing `n_threads` changes the
-draws. `n_threads` is capped at Numba's thread limit (`NUMBA_NUM_THREADS`).
+per-block changes are merged after every sweep. This is the distributed scheme
+of Newman et al. (2009): the within-sweep dependence between blocks is dropped,
+which is negligible when every block holds many cells. `n_threads` is capped at
+Numba's thread limit (`NUMBA_NUM_THREADS`); `res.params["seconds_per_sweep"]`
+records the measured cost.
 
-### Depth-scaled theta prior
-
-The fixed prior of `fit_hlda` puts the same concentration `alpha_c` on every
-topic, so with deep cells the prior is a few pseudo-counts against hundreds or
-thousands of tokens and has no say in how much of a cell stays in its identity
-topic. `prior_scale` ties the prior to each cell's depth. With `L_i` the number
-of tokens (UMIs) in cell `i`, `m` activity topics, `s = identity_share` and
-`kappa = prior_scale`,
-
-```
-alpha_i,identity = s * kappa * L_i
-alpha_i,activity = (1 - s) * kappa * L_i / m        (each activity topic)
+```python
+res = schlda.fit_hlda(adata, "cell_type", n_activity_topics=2, layer="counts",
+                      output_dir="results/pbmc", seed=0, n_threads=4)
 ```
 
-so the prior mean of the identity share is `s` at every depth and the prior
-strength is `kappa * L_i` pseudo-counts. Example: `L_i = 1000`, `m = 2`,
-`s = 0.7`, `kappa = 0.1` gives `alpha_i = (70, 15, 15)` on (identity, V1, V2).
-A priori the identity share is `Beta(s * kappa * L_i, (1 - s) * kappa * L_i)`;
-at `kappa = 0.1` and `L_i = 600` the prior probability of an identity share
-below 0.4 is about 1e-6, so cells leave their identity topic only when their
-counts insist. Nothing is truncated: the estimator is still the pooled
-empirical frequency of the retained assignments, and the prior acts through the
-token conditional, which gains a cell index on `alpha`. `prior_scale=None`
-(default) reproduces the fixed prior; `prior_scale` and `alpha_c` /
-`alpha_c_identity` cannot be combined.
+### Theta prior
 
-`prior_scale_identity=kappa` is the identity-only version: `alpha_i,identity =
-kappa * L_i` while every activity topic keeps `alpha_c` (0.1). It makes leaving
-the identity topic costly without putting prior mass on the activity topics,
-so cells that carry no activity program are not pushed to use one.
+A cell `i` may use its own identity topic and the activity topics `V1 … Vm`.
+Its topic usage has the Dirichlet prior
 
-| argument | default | meaning |
+```
+theta_i ~ Dirichlet(alpha_i,identity, alpha_i,1, ..., alpha_i,m)
+```
+
+set in one of three ways:
+
+| argument | accepts | sets |
 | --- | --- | --- |
-| `n_threads` | 1 | threads, and cell blocks, per sweep |
-| `prior_scale` | `None` | `kappa`: prior pseudo-counts per cell as a fraction of its tokens |
-| `identity_share` | 0.7 | prior mean of the identity share under `prior_scale` |
-| `prior_scale_identity` | `None` | identity-only depth scaling: `alpha_identity = kappa * L_i`, activity topics keep `alpha_c` |
-| `report_every` | 100 | sweeps between progress lines |
+| `alpha_c` | float, or array / Series with one value per cell | every activity topic: `alpha_i,1 = … = alpha_i,m` |
+| `alpha_c_identity` | float, or array / Series with one value per cell | `alpha_i,identity` (default: `alpha_c`) |
+| `prior_scale_identity` | float `kappa` | `alpha_i,identity = kappa * L_i`, `L_i` = the cell's UMI count |
 
-`res.params["seconds_per_sweep"]` records the measured cost.
+An array follows the row order of `adata`; a Series is aligned on
+`adata.obs_names`. Values must be positive. `prior_scale_identity` replaces
+`alpha_c_identity`, so the two cannot be combined.
+
+```python
+schlda.fit_hlda(adata, "cell_type", 1, alpha_c_identity=50)          # fixed, every cell
+schlda.fit_hlda(adata, "cell_type", 1, alpha_c_identity=adata.obs["a_id"],
+                alpha_c=1.0)                                          # one value per cell
+schlda.fit_hlda(adata, "cell_type", 1, prior_scale_identity=0.1)     # depth-scaled
+```
+
+The prior mean of the identity share is
+`alpha_i,identity / (alpha_i,identity + m * alpha_c)`. How much it moves a cell
+depends on depth, because the prior counts as `alpha` pseudo-tokens against
+`L_i` real ones. A fixed value dominates shallow cells and barely touches deep
+ones; `prior_scale_identity` keeps the same share at every depth:
+
+| `L_i` | `alpha_c_identity=50` | `prior_scale_identity=0.1` |
+| --- | --- | --- |
+| 100 | 50 / 150 = 33 % | 10 / 110 = 9 % |
+| 600 | 50 / 650 = 8 % | 60 / 660 = 9 % |
+| 3000 | 50 / 3050 = 1.6 % | 300 / 3300 = 9 % |
+
+Nothing is truncated: `theta` is still the pooled frequency of the retained
+assignments, and the prior acts only through each token's conditional,
+
+```
+p(z = k | ...)  ∝  (alpha_beta + A_gk) / (G * alpha_beta + B_k)  *  (alpha_ik + D_ik)
+```
 
 ## Plot
 

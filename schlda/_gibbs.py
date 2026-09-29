@@ -1,9 +1,8 @@
-"""Collapsed Gibbs sampler for HLDA.
+"""Token arrays, count tables and posterior chains for the HLDA sampler.
 
 The token-level representation is the long format used throughout: every UMI is
-one token carrying (cell, gene, identity, topic). The sampler resamples each
-token's topic from the topics its cell's identity is allowed to use, which is
-its own identity topic plus every shared activity topic.
+one token carrying (cell, gene, identity, topic). The sampling kernel itself is
+in ``_gibbs_blocked``.
 """
 
 from __future__ import annotations
@@ -13,14 +12,6 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from numba import njit
-from numba.typed import List as TypedList
-
-
-@njit(cache=True)
-def _seed_numba_rng(seed):
-    """Numba keeps its own RNG state; seeding it requires a call from njit code."""
-    np.random.seed(seed)
 
 
 def expand_tokens(counts, cell_identity_ints):
@@ -48,89 +39,6 @@ def compute_count_tables(cell_idx, gene_idx, z, n_cells, n_genes, K):
         B.astype(np.int32),
         D.reshape(n_cells, K).astype(np.int32),
     )
-
-
-def build_valid_list(topic_hierarchy):
-    """Numba typed list mapping identity int -> array of topic ints it may use."""
-    valid_list = TypedList()
-    for ident_int in sorted(topic_hierarchy):
-        valid_list.append(np.asarray(topic_hierarchy[ident_int], dtype=np.int32))
-    return valid_list
-
-
-@njit(cache=True)
-def _gibbs_block(
-    cell_idx_arr,
-    gene_idx_arr,
-    cell_identity_arr,
-    z_arr,
-    A,
-    B,
-    D,
-    valid_list,
-    alpha_beta,
-    alpha_c,
-    G,
-    K,
-    it_start,
-    it_end,
-    burn_in,
-    thin,
-    cnt_start,
-    A_chain,
-    D_chain,
-):
-    """Run Gibbs sweeps [it_start, it_end) and write thinned post-burn-in draws."""
-    total_tokens = cell_idx_arr.shape[0]
-    n_cells = D.shape[0]
-    G_abeta = G * alpha_beta
-    probs = np.empty(K, np.float64)  # reused across tokens
-    cnt = cnt_start
-
-    for it in range(it_start, it_end):
-        for idx in range(total_tokens):
-            c = cell_idx_arr[idx]
-            g = gene_idx_arr[idx]
-            ident = cell_identity_arr[idx]
-            old_z = z_arr[idx]
-
-            A[g, old_z] -= 1
-            B[old_z] -= 1
-            D[c, old_z] -= 1
-
-            vt = valid_list[ident]
-            m = vt.shape[0]
-            total_p = 0.0
-            for j in range(m):
-                t = vt[j]
-                p = ((alpha_beta + A[g, t]) / (G_abeta + B[t])) * (alpha_c[t] + D[c, t])
-                probs[j] = p
-                total_p += p
-
-            r = np.random.rand() * total_p
-            cum = 0.0
-            new_z = vt[m - 1]
-            for j in range(m):
-                cum += probs[j]
-                if r < cum:
-                    new_z = vt[j]
-                    break
-
-            A[g, new_z] += 1
-            B[new_z] += 1
-            D[c, new_z] += 1
-            z_arr[idx] = new_z
-
-        if it >= burn_in and ((it - burn_in + 1) % thin == 0):
-            for gg in range(G):
-                for tt in range(K):
-                    A_chain[cnt, gg, tt] = A[gg, tt]
-            for cc in range(n_cells):
-                for tt in range(K):
-                    D_chain[cnt, cc, tt] = D[cc, tt]
-            cnt += 1
-
-    return cnt
 
 
 def open_chains(sample_dir, n_save, n_genes, n_cells, K, mode="w+"):

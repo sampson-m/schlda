@@ -4,7 +4,8 @@ One identity topic per annotated cell type, plus a set of activity topics that
 every cell may use. A cell's tokens are only ever assigned to its own identity
 topic or to a shared activity topic, so identity topics stay pinned to the
 annotation and the activity topics are left to absorb whatever varies across
-cell types.
+cell types. ``fit_hlda`` samples with the blocked kernel in ``_gibbs_blocked``;
+one thread is the exact collapsed Gibbs sampler.
 """
 
 from __future__ import annotations
@@ -18,7 +19,9 @@ import numpy as np
 import pandas as pd
 import scipy.sparse as sp
 
-from . import _gibbs, _init
+from numba import config as numba_config, set_num_threads
+
+from . import _gibbs, _gibbs_blocked, _init
 
 __all__ = ["fit_hlda", "HLDAResult"]
 
@@ -81,12 +84,15 @@ def fit_hlda(
     n_loops=3000,
     burn_in=1000,
     thin=30,
+    n_threads=1,
     alpha_beta=0.1,
     alpha_c=0.1,
     alpha_c_identity=None,
+    prior_scale_identity=None,
     seed=None,
     key_added="schlda",
     verbose=True,
+    report_every=100,
 ):
     """Fit HLDA to raw counts in an AnnData by collapsed Gibbs sampling.
 
@@ -114,22 +120,31 @@ def fit_hlda(
     n_loops, burn_in, thin
         Gibbs sweeps in total, sweeps discarded, and the interval between kept
         draws. ``(n_loops - burn_in) // thin`` draws are saved.
+    n_threads
+        1 (default) runs the exact collapsed Gibbs sampler. ``P > 1`` splits the
+        cells into ``P`` blocks swept in parallel, each against a private copy
+        of the gene-topic table merged after every sweep (Newman et al. 2009).
     alpha_beta
         Dirichlet concentration on the gene distributions.
     alpha_c
-        Dirichlet concentration on activity topic usage.
+        Dirichlet concentration on each activity topic: a float, or one value
+        per cell (array in ``adata`` row order, or a Series aligned on
+        ``adata.obs_names``).
     alpha_c_identity
-        Concentration on identity topic usage. Defaults to ``alpha_c``. Setting
-        it apart from ``alpha_c`` biases how readily tokens leave the identity
-        topic.
+        Concentration on the cell's identity topic, float or one value per
+        cell. Defaults to ``alpha_c``.
+    prior_scale_identity
+        ``kappa``: identity concentration ``kappa * L_i``, with ``L_i`` the
+        cell's UMI count, so the prior carries the same share of every cell's
+        evidence. Replaces ``alpha_c_identity``.
     seed
-        Seeds initialisation and the Gibbs chain. Without it neither is
-        reproducible, since the compiled kernel keeps its own RNG state.
+        Seeds initialisation and the chain. A run repeats exactly for a fixed
+        ``seed`` and ``n_threads``.
     key_added
         Results are written to ``adata.obsm[f"{key_added}_theta"]``,
         ``adata.varm[f"{key_added}_beta"]`` and ``adata.uns[key_added]``.
-    verbose
-        Print progress.
+    verbose, report_every
+        Print progress every ``report_every`` sweeps.
 
     Returns
     -------
@@ -141,6 +156,8 @@ def fit_hlda(
     n_loops = _check_int(n_loops, "n_loops", minimum=1)
     burn_in = _check_int(burn_in, "burn_in", minimum=0)
     thin = _check_int(thin, "thin", minimum=1)
+    n_threads = _check_int(n_threads, "n_threads", minimum=1)
+    report_every = _check_int(report_every, "report_every", minimum=1)
     if burn_in >= n_loops:
         raise ValueError(f"burn_in ({burn_in}) must be less than n_loops ({n_loops}).")
     n_save = (n_loops - burn_in) // thin
@@ -151,6 +168,12 @@ def fit_hlda(
         )
     if init not in ("data_driven", "random"):
         raise ValueError(f"init must be 'data_driven' or 'random', got {init!r}.")
+    if prior_scale_identity is not None:
+        if alpha_c_identity is not None:
+            raise ValueError("prior_scale_identity replaces alpha_c_identity; give one of them.")
+        if not (np.isscalar(prior_scale_identity) and np.isfinite(prior_scale_identity)
+                and prior_scale_identity > 0):
+            raise ValueError(f"prior_scale_identity must be a positive number, got {prior_scale_identity!r}.")
 
     counts = _get_counts(adata, layer)
     labels = _get_labels(adata, cell_type_key)
@@ -164,90 +187,100 @@ def fit_hlda(
             f"Topic names are not unique: {topic_names}. Cell type labels must "
             f"not collide with the activity topic names V1..V{n_activity}."
         )
+    act_cells = _per_cell(alpha_c, "alpha_c", adata.obs_names)
+    id_cells = None if alpha_c_identity is None else _per_cell(alpha_c_identity, "alpha_c_identity",
+                                                               adata.obs_names)
 
     output_dir = _resolve_output_dir(output_dir)
     sample_dir = output_dir / "samples"
-
     n_cells, n_genes = counts.shape
-    label_to_int = {value: i for i, value in enumerate(identity_values)}
-    identity_ints = labels.map(label_to_int).to_numpy(dtype=np.int32)
+    identity_ints = labels.map({v: i for i, v in enumerate(identity_values)}).to_numpy(dtype=np.int32)
+
+    max_threads = int(numba_config.NUMBA_NUM_THREADS)
+    if n_threads > max_threads:
+        if verbose:
+            print(f"[schlda] n_threads={n_threads} exceeds Numba's limit {max_threads}; using {max_threads}")
+        n_threads = max_threads
+    set_num_threads(n_threads)
 
     if verbose:
         print(
             f"[schlda] {n_cells:,} cells x {n_genes:,} genes, "
-            f"{n_topics} topics ({n_identity} identity + {n_activity} activity)"
+            f"{n_topics} topics ({n_identity} identity + {n_activity} activity), {n_threads} thread(s)"
         )
         print(f"[schlda] output -> {output_dir}")
 
-    if seed is not None:
-        np.random.seed(seed)  # the numba kernel draws from numpy's global state
-        _gibbs._seed_numba_rng(seed)
-    rng = np.random.default_rng(seed)
+    chain_seed = int(np.random.SeedSequence().entropy % 2**31) if seed is None else int(seed)
+    np.random.seed(chain_seed)
+    rng = np.random.default_rng(chain_seed)
 
     cell_idx, gene_idx, ident_rep = _gibbs.expand_tokens(counts, identity_ints)
-    if verbose:
-        print(f"[schlda] {cell_idx.shape[0]:,} tokens")
-
     z = _init.initial_assignments(
         counts, identity_ints, cell_idx, ident_rep,
         n_identity, n_activity, init, rng, verbose=verbose,
     )
-
     A, B, D = _gibbs.compute_count_tables(cell_idx, gene_idx, z, n_cells, n_genes, n_topics)
+    cell_offsets = _gibbs_blocked.cell_offsets_from_idx(cell_idx, n_cells)
+    tokens_per_cell = np.diff(cell_offsets)
 
-    alpha_c_id = alpha_c if alpha_c_identity is None else alpha_c_identity
-    alpha_c_arr = np.full(n_topics, float(alpha_c), dtype=np.float64)
-    alpha_c_arr[:n_identity] = float(alpha_c_id)
+    if prior_scale_identity is not None:
+        id_cells = float(prior_scale_identity) * tokens_per_cell.astype(np.float64)
+        prior = "identity_depth_scaled"
+    else:
+        id_cells = act_cells if id_cells is None else id_cells
+        scalar = np.isscalar(alpha_c) and (alpha_c_identity is None or np.isscalar(alpha_c_identity))
+        prior = "fixed" if scalar else "per_cell"
+    alpha = np.empty((n_cells, n_topics), dtype=np.float64)
+    alpha[:, n_identity:] = act_cells[:, None]
+    alpha[:, :n_identity] = id_cells[:, None]
 
-    topic_hierarchy = {
-        k: [k] + [n_identity + i for i in range(n_activity)] for k in range(n_identity)
-    }
-    valid_list = _gibbs.build_valid_list(topic_hierarchy)
-
-    A_chain, D_chain = _gibbs.open_chains(sample_dir, n_save, n_genes, n_cells, n_topics)
+    valid_topics, valid_offsets = _gibbs_blocked.build_valid(n_identity, n_activity)
+    block_bounds = _gibbs_blocked.make_blocks(cell_offsets, n_threads)
+    n_blocks = block_bounds.shape[0] - 1
+    dA = np.zeros((n_blocks, n_genes, n_topics), dtype=np.int32)
+    dB = np.zeros((n_blocks, n_topics), dtype=np.int32)
+    gene_idx = np.ascontiguousarray(gene_idx.astype(np.int32))
+    z = np.ascontiguousarray(z.astype(np.int32))
 
     if verbose:
-        print(
-            f"[schlda] Gibbs: n_loops={n_loops} burn_in={burn_in} thin={thin} "
-            f"({n_save} draws kept)"
-        )
+        print(f"[schlda] {cell_idx.shape[0]:,} tokens, {n_blocks} block(s)")
+        if prior == "identity_depth_scaled":
+            print(f"[schlda] prior: alpha_identity = {prior_scale_identity} * L_i "
+                  f"(median L_i {np.median(tokens_per_cell):.0f})")
+        elif prior == "per_cell":
+            print(f"[schlda] prior: per-cell alpha (identity median {np.median(id_cells):.3g}, "
+                  f"activity median {np.median(act_cells):.3g})")
+        print(f"[schlda] Gibbs: n_loops={n_loops} burn_in={burn_in} thin={thin} ({n_save} draws kept)")
+
+    A_chain, D_chain = _gibbs.open_chains(sample_dir, n_save, n_genes, n_cells, n_topics)
     t_gibbs = time.time()
     cnt = 0
-    for block_start in range(0, n_loops, _BLOCK):
-        block_end = min(block_start + _BLOCK, n_loops)
-        cnt = _gibbs._gibbs_block(
-            cell_idx, gene_idx, ident_rep, z,
-            A, B, D, valid_list,
-            np.float64(alpha_beta), alpha_c_arr,
-            np.int32(n_genes), np.int32(n_topics),
-            np.int32(block_start), np.int32(block_end),
-            np.int32(burn_in), np.int32(thin), np.int32(cnt),
-            A_chain, D_chain,
-        )
-        if verbose:
+    for sweep in range(n_loops):
+        seeds = _gibbs_blocked.block_seeds(chain_seed, sweep, n_blocks)
+        _gibbs_blocked.gibbs_sweep(cell_offsets, gene_idx, z, identity_ints, valid_topics, valid_offsets,
+                                   A, B, D, np.float64(alpha_beta), alpha, block_bounds, seeds, dA, dB)
+        if sweep >= burn_in and (sweep - burn_in + 1) % thin == 0:
+            A_chain[cnt] = A
+            D_chain[cnt] = D
+            cnt += 1
+        if verbose and (sweep + 1) % report_every == 0:
             elapsed = time.time() - t_gibbs
-            rate = elapsed / block_end
-            print(
-                f"[schlda]   sweep {block_end}/{n_loops} "
-                f"({elapsed / 60:.1f} min elapsed, "
-                f"~{rate * (n_loops - block_end) / 60:.1f} min left)",
-                flush=True,
-            )
-
+            print(f"[schlda]   sweep {sweep + 1}/{n_loops} ({elapsed / 60:.1f} min elapsed, "
+                  f"~{elapsed / (sweep + 1) * (n_loops - sweep - 1) / 60:.1f} min left)", flush=True)
     if cnt != n_save:
         raise RuntimeError(f"Expected {n_save} saved draws, sampler wrote {cnt}.")
     A_chain.flush()
     D_chain.flush()
+    seconds_per_sweep = (time.time() - t_gibbs) / n_loops
 
     beta, theta = _gibbs.posterior_means(
         A_chain, D_chain, n_save, adata.var_names, adata.obs_names, topic_names
     )
+    topic_types = ["identity"] * n_identity + ["activity"] * n_activity
+    topics = pd.DataFrame({"topic_id": range(n_topics), "topic_name": topic_names, "topic_type": topic_types})
 
-    topics = pd.DataFrame({
-        "topic_id": range(n_topics),
-        "topic_name": topic_names,
-        "topic_type": ["identity"] * n_identity + ["activity"] * n_activity,
-    })
+    def _record(x):
+        return float(x) if x is not None and np.isscalar(x) else ("per_cell" if x is not None else None)
 
     params = {
         "cell_type_key": str(cell_type_key),
@@ -259,31 +292,37 @@ def fit_hlda(
         "thin": int(thin),
         "n_save": int(n_save),
         "alpha_beta": float(alpha_beta),
-        "alpha_c": float(alpha_c),
-        "alpha_c_identity": float(alpha_c_id),
+        "prior": prior,
+        "alpha_c": _record(alpha_c),
+        "alpha_c_identity": (None if prior_scale_identity is not None else
+                             _record(alpha_c if alpha_c_identity is None else alpha_c_identity)),
+        "prior_scale_identity": None if prior_scale_identity is None else float(prior_scale_identity),
+        "n_threads": int(n_threads),
+        "n_blocks": int(n_blocks),
         "n_tokens": int(cell_idx.shape[0]),
+        "seed": chain_seed,
+        "seconds_per_sweep": float(seconds_per_sweep),
     }
-    if seed is not None:
-        params["seed"] = int(seed)
 
     beta.to_csv(output_dir / "HLDA_beta.csv")
     theta.to_csv(output_dir / "HLDA_theta.csv")
     topics.to_csv(output_dir / "topic_info.csv", index=False)
-    _gibbs.write_sample_metadata(
-        sample_dir, n_save, n_genes, n_cells, n_topics, topic_names, params
-    )
+    if prior != "fixed":
+        pd.DataFrame({"identity": id_cells, "activity": act_cells},
+                     index=adata.obs_names).to_csv(output_dir / "theta_prior.csv")
+    _gibbs.write_sample_metadata(sample_dir, n_save, n_genes, n_cells, n_topics, topic_names, params)
 
     adata.obsm[f"{key_added}_theta"] = theta.to_numpy()
     adata.varm[f"{key_added}_beta"] = beta.to_numpy()
     adata.uns[key_added] = {
         "topic_names": topic_names,
-        "topic_types": ["identity"] * n_identity + ["activity"] * n_activity,
+        "topic_types": topic_types,
         "params": params,
         "output_dir": str(output_dir),
     }
 
     if verbose:
-        print(f"[schlda] done in {(time.time() - t_start) / 60:.1f} min")
+        print(f"[schlda] done in {(time.time() - t_start) / 60:.1f} min ({seconds_per_sweep:.2f} s/sweep)")
 
     return HLDAResult(
         theta=theta,
@@ -295,7 +334,24 @@ def fit_hlda(
     )
 
 
-_BLOCK = 100  # Gibbs sweeps between progress reports
+def _per_cell(value, name, obs_names):
+    """A positive float, or one value per cell (array in row order / Series aligned on obs_names)."""
+    n = len(obs_names)
+    if np.isscalar(value):
+        out = np.full(n, float(value), dtype=np.float64)
+    elif isinstance(value, pd.Series):
+        aligned = value.reindex(obs_names)
+        if aligned.isna().any():
+            missing = int(aligned.isna().sum())
+            raise ValueError(f"{name}: {missing} cell(s) missing from the Series index or NaN.")
+        out = aligned.to_numpy(dtype=np.float64)
+    else:
+        out = np.asarray(value, dtype=np.float64).ravel()
+        if out.shape[0] != n:
+            raise ValueError(f"{name} must be a number or have one value per cell ({n}), got {out.shape[0]}.")
+    if not (np.all(np.isfinite(out)) and np.all(out > 0)):
+        raise ValueError(f"{name} must be positive and finite.")
+    return out
 
 
 def _check_int(value, name, minimum=None):

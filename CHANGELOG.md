@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.4.0 — 2026-09-29
+
+- One fitting function. `fit_hlda` now runs the blocked sampler: `n_threads=1`
+  (default) is the exact collapsed Gibbs sampler, `n_threads > 1` sweeps cell
+  blocks in parallel. The old serial kernel is removed; at a fixed seed
+  `fit_hlda` draws differ from 0.3.x (same sampler, different random stream)
+  and match 0.3.x `fit_hlda_parallel` exactly.
+- `fit_hlda_parallel` is removed: pass `n_threads` to `fit_hlda`.
+- `alpha_c` and `alpha_c_identity` accept a float or one value per cell (array
+  in `adata` row order, or a Series aligned on `adata.obs_names`).
+  `prior_scale_identity` is available in `fit_hlda`. Per-cell or depth-scaled
+  concentrations are written to `theta_prior.csv`.
+- The symmetric depth-scaled prior (`prior_scale`, `identity_share`) is
+  removed.
+- `params` always records `seed`, `n_threads`, `n_blocks`, `prior` and
+  `seconds_per_sweep`.
+
 ## 0.3.1 — 2026-09-29
 
 - `prior_scale_identity` (kappa): identity-only depth-scaled theta prior,

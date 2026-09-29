@@ -1,4 +1,4 @@
-"""Blocked collapsed Gibbs sweep (ported from hlda 0.1.0).
+"""Blocked collapsed Gibbs sweep, the sampling kernel of ``fit_hlda``.
 
 Cells are split into contiguous blocks; each block is swept by one thread with
 a private copy of the gene-topic table ``A`` and the topic totals ``B`` while
@@ -8,8 +8,8 @@ Gibbs sampler; several blocks give the approximate distributed scheme of
 Newman et al. (2009). Every block reseeds its thread's generator from
 ``seeds[p]``, so a run is reproducible for a fixed ``seed`` and block count.
 
-``alpha_c`` is cells x topics: the concentration may differ per cell (the
-depth-scaled prior of ``fit_hlda_parallel``).
+``alpha_c`` is cells x topics: the concentration may differ per cell (per-cell
+or depth-scaled priors of ``fit_hlda``).
 """
 
 from __future__ import annotations
