@@ -3,15 +3,15 @@
 Two schemes are available:
 
 ``random``
-    Every token draws uniformly from the topics its cell's identity may use.
+    Every token draws uniformly from the topics its cell may use.
 
 ``data_driven``
-    Each identity gets a provisional topic from the mean expression of its
-    cells. A cell whose profile correlates well with that topic starts out
-    heavily loaded on its identity topic; a cell that correlates poorly starts
-    with more of its tokens pushed onto the shared activity topics. The
-    correlation is mapped through a sigmoid centred at 0.7, so the split moves
-    smoothly between roughly 20% and 90% identity.
+    Each node with identity topics gets a provisional profile from the mean expression of its cells. A cell
+    whose profile correlates well with it starts out heavily loaded on its identity topic(s); a cell that
+    correlates poorly starts with more of its tokens on the topics it shares with other cells (group and
+    activity topics). The correlation is mapped through a sigmoid centred at 0.7, so the split moves
+    smoothly between roughly 20% and 90% identity. Tokens kept on identity are spread uniformly over the
+    cell's identity sub-topics.
 """
 
 from __future__ import annotations
@@ -74,39 +74,38 @@ def identity_weights(corr):
     return 0.2 + 0.7 / (1.0 + np.exp(-10.0 * (clamped - 0.7)))
 
 
-def initial_assignments(
-    counts,
-    identity_ints,
-    cell_idx,
-    ident_rep,
-    n_identity,
-    n_activity,
-    scheme,
-    rng,
-    verbose=True,
-):
-    """Return the initial topic of every token.
+def _pick(topics, offsets, nodes, rng):
+    """One uniform draw per token from its node's row of a CSR topic table."""
+    if nodes.shape[0] == 0:
+        return np.empty(0, dtype=np.int32)
+    start = offsets[nodes]
+    width = offsets[nodes + 1] - start
+    w = np.unique(width)
+    if w.size == 1:
+        j = np.zeros(nodes.shape[0], dtype=np.int64) if w[0] == 1 else rng.integers(0, w[0], size=nodes.shape[0])
+    else:
+        j = np.minimum(np.floor(rng.random(nodes.shape[0]) * width).astype(np.int64), width - 1)
+    return topics[start + j].astype(np.int32)
 
-    Identity topic ``k`` has topic index ``k``; activity topic ``Vi`` has index
-    ``n_identity + i - 1``.
-    """
-    n_tokens = ident_rep.shape[0]
+
+def initial_assignments(counts, cell_node, cell_idx, node_rep, geometry, scheme, rng, verbose=True):
+    """Return the initial topic of every token (``node_rep`` = node id per token)."""
+    n_tokens = node_rep.shape[0]
+    valid_t, valid_o = geometry.csr()
+    is_id = geometry.identity_mask()
 
     if scheme == "random":
-        if n_activity == 0:
-            z0 = ident_rep.astype(np.int32)
-        else:
-            pick = rng.integers(0, n_activity + 1, size=n_tokens)
-            z0 = np.where(pick == 0, ident_rep, n_identity + pick - 1).astype(np.int32)
+        z0 = _pick(valid_t, valid_o, node_rep, rng)
         if verbose:
-            _report(z0, n_identity, n_activity)
+            _report(z0, geometry)
         return z0
 
     if scheme != "data_driven":
         raise ValueError(f"Unknown init scheme {scheme!r}; expected 'data_driven' or 'random'.")
 
-    betas = identity_betas(counts, identity_ints, n_identity)
-    corr = identity_correlations(counts, identity_ints, betas)
+    n_nodes = len(geometry.nodes)
+    betas = identity_betas(counts, cell_node, n_nodes)
+    corr = identity_correlations(counts, cell_node, betas)
     weights = identity_weights(corr)
 
     if verbose:
@@ -119,27 +118,30 @@ def initial_assignments(
             f"mean={weights.mean():.3f} range=[{weights.min():.3f}, {weights.max():.3f}]"
         )
 
-    z0 = ident_rep.astype(np.int32)
-    if n_activity > 0:
-        to_activity = rng.random(n_tokens) > weights[cell_idx]
-        n_move = int(to_activity.sum())
-        if n_move:
-            z0[to_activity] = (
-                n_identity + rng.integers(0, n_activity, size=n_move)
-            ).astype(np.int32)
+    own_t, own_o = geometry.csr(is_id)
+    sh_t, sh_o = geometry.csr(~is_id)
+    own_w = np.diff(own_o)[node_rep]
+    sh_w = np.diff(sh_o)[node_rep]
+    move = np.zeros(n_tokens, dtype=bool)
+    if (sh_w > 0).any():
+        move = rng.random(n_tokens) > weights[cell_idx]
+    move = (move | (own_w == 0)) & (sh_w > 0)
+    z0 = np.empty(n_tokens, dtype=np.int32)
+    if move.any():
+        z0[move] = _pick(sh_t, sh_o, node_rep[move], rng)
+    z0[~move] = _pick(own_t, own_o, node_rep[~move], rng)
 
     if verbose:
-        _report(z0, n_identity, n_activity)
+        _report(z0, geometry)
     return z0
 
 
-def _report(z0, n_identity, n_activity):
+def _report(z0, geometry):
     n_tokens = z0.shape[0]
-    n_id = int((z0 < n_identity).sum())
-    print(
-        f"[schlda] init: {n_tokens:,} tokens -> "
-        f"{n_id / n_tokens:.1%} identity, {1 - n_id / n_tokens:.1%} activity"
-    )
-    for i in range(n_activity):
-        share = float((z0 == n_identity + i).sum()) / n_tokens
-        print(f"[schlda] init:   V{i + 1}: {share:.1%}")
+    is_id = geometry.identity_mask()
+    share = np.bincount(z0, minlength=geometry.n_topics) / n_tokens
+    n_id = float(share[is_id].sum())
+    print(f"[schlda] init: {n_tokens:,} tokens -> {n_id:.1%} identity, {1 - n_id:.1%} shared")
+    for name, s, i in zip(geometry.topic_names, share, is_id):
+        if not i:
+            print(f"[schlda] init:   {name}: {s:.1%}")

@@ -59,7 +59,8 @@ Use `key_added` to fit several models into one object.
 ```
 HLDA_beta.csv           genes x topics posterior mean
 HLDA_theta.csv          cells x topics posterior mean
-topic_info.csv          topic_id, topic_name, topic_type
+topic_info.csv          topic_id, topic_name, topic_type (identity / group / activity), node
+allowed_topics.csv      node x topic 0/1 mask of permitted topics
 samples/A_chain.memmap  (n_save, n_genes, n_topics) int32 gene-topic counts
 samples/D_chain.memmap  (n_save, n_cells, n_topics) int32 cell-topic counts
 samples/samples_meta.json   shapes, topic names, run parameters
@@ -171,7 +172,55 @@ assignments, and the prior acts only through each token's conditional,
 p(z = k | ...)  ∝  (alpha_beta + A_gk) / (G * alpha_beta + B_k)  *  (alpha_ik + D_ik)
 ```
 
-## Plot
+## Topic geometry
+
+By default each cell type has one identity topic and every cell shares the
+activity topics `V1 … Vm`. More generally the topics sit on a tree: the root
+holds the activity topics, each cell type is a leaf with its own identity
+topic(s), groups of types are internal nodes that may own topics, and a cell
+may use every topic on its path from the root.
+
+```
+root: V1
+├── lymphoid: lymphoid          <- used by B, CD4T and CD8T cells only
+│   ├── B: B
+│   ├── CD4T: CD4T_1, CD4T_2    <- two identity sub-topics
+│   └── CD8T: CD8T
+└── myeloid: myeloid
+    └── Mono: Mono
+```
+
+| geometry | call |
+| --- | --- |
+| one identity topic per type + `m` shared (default) | `fit_hlda(adata, "cell_type", m)` |
+| identity sub-topics | `fit_hlda(adata, "cell_type", m, n_identity_topics={"CD4T": 2})` |
+| groups from a nested annotation | `fit_hlda(adata, ["lineage", "cell_type"], m)` |
+| groups given by hand (any depth) | `fit_hlda(adata, "cell_type", m, groups={"lymphoid": ["B", "T"], "T": ["CD4T", "CD8T"]})` |
+| topics per group | `n_group_topics=1` (default) or `{"lymphoid": 2, "T": 0}` |
+| no shared topics | `m = 0` |
+| anything else | `fit_hlda(adata, "cell_type", allowed=mask)` |
+
+`mask` is a boolean DataFrame with one row per cell type and one column per
+topic, named as the topics should be; a column allowed for a single type is an
+identity topic, any other is shared. With a list of annotation columns, a cell
+whose finer label is missing sits at its coarser node and uses that node's
+path only. Check a geometry before fitting:
+
+```python
+g = schlda.topic_geometry(adata, ["lineage", "cell_type"], 1)
+print(g.describe())
+g.allowed_frame()          # node x topic permission mask
+```
+
+The identity concentration is split evenly over a type's sub-topics, so adding
+sub-topics does not change the prior weight on identity; group topics take
+`alpha_c`. `res.identity_share()` sums a cell's identity sub-topics.
+
+A program used at a near-constant share by every cell of a group cannot be
+split between the group topic and that group's identity topics (the likelihood
+is flat along the split). Group topics are identified by cell-to-cell
+variation in their use, as activity topics are.
+
 
 ```python
 schlda.structure_plot(res, save="structure.pdf")

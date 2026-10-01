@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.5.0 — 2026-10-01
+
+- Topic geometry. A cell may use every topic on its path in a topic tree:
+  its identity topic(s), the topics of the groups above it, and the activity
+  topics on the root. New `fit_hlda` arguments:
+  - `n_identity_topics`: int or `{cell_type: k}`, identity sub-topics
+    (`type_1 .. type_k`);
+  - `cell_type_key` may be a list of obs columns, coarse to fine; each coarse
+    value becomes a group, and a cell missing a finer label sits at its coarser
+    node;
+  - `groups={group: [members]}` builds the same hierarchy without a column
+    (members are types or groups, any depth); `n_group_topics` (int or dict,
+    default 1) sets the topics each group owns;
+  - `allowed`: a cell type x topic boolean DataFrame for any other geometry.
+- `topic_geometry(...)` previews the geometry without fitting
+  (`describe()`, `allowed_frame()`).
+- Identity concentration (`alpha_c_identity` / `prior_scale_identity`) is
+  split evenly over a type's identity sub-topics; group topics take `alpha_c`.
+- `topic_info.csv` gains a `node` column and topic type `group`;
+  `allowed_topics.csv` is written; `HLDAResult` gains `geometry`, `allowed`,
+  `group_topics`, `topics_of()` and `identity_share()`.
+- The sampler kernel is unchanged. The v0.4.0 geometry reproduces v0.4.0 fits
+  exactly at a fixed seed (`tests/data/golden_v040.npz`).
+
 ## 0.4.0 — 2026-09-29
 
 - One fitting function. `fit_hlda` now runs the blocked sampler: `n_threads=1`

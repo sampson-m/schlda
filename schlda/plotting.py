@@ -290,7 +290,7 @@ def _resolve(theta, cell_types, key, activity_topics):
     groups = None
 
     if hasattr(theta, "theta") and hasattr(theta, "topics"):  # HLDAResult
-        activity = theta.activity_topics
+        activity = theta.topics.loc[theta.topics.topic_type != "identity", "topic_name"].tolist()
         groups = theta.cell_types
         theta_df = theta.theta
     elif hasattr(theta, "obsm"):  # AnnData
@@ -307,7 +307,7 @@ def _resolve(theta, cell_types, key, activity_topics):
             names = [f"Topic_{i}" for i in range(values.shape[1])]
         types = list(info.get("topic_types", []))
         if len(types) == len(names):
-            activity = [n for n, t in zip(names, types) if t == "activity"]
+            activity = [n for n, t in zip(names, types) if t != "identity"]
         theta_df = pd.DataFrame(values, index=theta.obs_names, columns=names)
         if isinstance(cell_types, str):
             groups = theta.obs[cell_types]
