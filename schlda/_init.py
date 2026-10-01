@@ -6,12 +6,11 @@ Two schemes are available:
     Every token draws uniformly from the topics its cell may use.
 
 ``data_driven``
-    Each node with identity topics gets a provisional profile from the mean expression of its cells. A cell
-    whose profile correlates well with it starts out heavily loaded on its identity topic(s); a cell that
-    correlates poorly starts with more of its tokens on the topics it shares with other cells (group and
-    activity topics). The correlation is mapped through a sigmoid centred at 0.7, so the split moves
+    Each cell type gets a provisional profile from the mean expression of its cells. A cell whose profile
+    correlates well with it starts out heavily loaded on its identity topic(s); a cell that correlates
+    poorly starts with more of its tokens on the activity topics it may use. The correlation is mapped through a sigmoid centred at 0.7, so the split moves
     smoothly between roughly 20% and 90% identity. Tokens kept on identity are spread uniformly over the
-    cell's identity sub-topics.
+    type's identity topics.
 """
 
 from __future__ import annotations
@@ -75,7 +74,7 @@ def identity_weights(corr):
 
 
 def _pick(topics, offsets, nodes, rng):
-    """One uniform draw per token from its node's row of a CSR topic table."""
+    """One uniform draw per token from its cell type's row of a CSR topic table."""
     if nodes.shape[0] == 0:
         return np.empty(0, dtype=np.int32)
     start = offsets[nodes]
@@ -89,7 +88,7 @@ def _pick(topics, offsets, nodes, rng):
 
 
 def initial_assignments(counts, cell_node, cell_idx, node_rep, geometry, scheme, rng, verbose=True):
-    """Return the initial topic of every token (``node_rep`` = node id per token)."""
+    """Return the initial topic of every token (``node_rep`` = cell type index per token)."""
     n_tokens = node_rep.shape[0]
     valid_t, valid_o = geometry.csr()
     is_id = geometry.identity_mask()
@@ -103,7 +102,7 @@ def initial_assignments(counts, cell_node, cell_idx, node_rep, geometry, scheme,
     if scheme != "data_driven":
         raise ValueError(f"Unknown init scheme {scheme!r}; expected 'data_driven' or 'random'.")
 
-    n_nodes = len(geometry.nodes)
+    n_nodes = len(geometry.cell_types)
     betas = identity_betas(counts, cell_node, n_nodes)
     corr = identity_correlations(counts, cell_node, betas)
     weights = identity_weights(corr)

@@ -59,8 +59,8 @@ Use `key_added` to fit several models into one object.
 ```
 HLDA_beta.csv           genes x topics posterior mean
 HLDA_theta.csv          cells x topics posterior mean
-topic_info.csv          topic_id, topic_name, topic_type (identity / group / activity), node
-allowed_topics.csv      node x topic 0/1 mask of permitted topics
+topic_info.csv          topic_id, topic_name, topic_type
+allowed_topics.csv      cell type x topic 0/1 mask of permitted topics
 samples/A_chain.memmap  (n_save, n_genes, n_topics) int32 gene-topic counts
 samples/D_chain.memmap  (n_save, n_cells, n_topics) int32 cell-topic counts
 samples/samples_meta.json   shapes, topic names, run parameters
@@ -174,53 +174,55 @@ p(z = k | ...)  ∝  (alpha_beta + A_gk) / (G * alpha_beta + B_k)  *  (alpha_ik 
 
 ## Topic geometry
 
-By default each cell type has one identity topic and every cell shares the
-activity topics `V1 … Vm`. More generally the topics sit on a tree: the root
-holds the activity topics, each cell type is a leaf with its own identity
-topic(s), groups of types are internal nodes that may own topics, and a cell
-may use every topic on its path from the root.
+Two choices. The default, `n_activity_topics=m`, gives each cell type one
+identity topic and shares `V1 … Vm` across every cell. For anything else pass
+`allowed`: a boolean DataFrame with one row per cell type and one column per
+topic, saying which topics each type may use. A topic allowed for exactly one
+type is an identity topic of that type; any other is an activity topic.
 
-```
-root: V1
-├── lymphoid: lymphoid          <- used by B, CD4T and CD8T cells only
-│   ├── B: B
-│   ├── CD4T: CD4T_1, CD4T_2    <- two identity sub-topics
-│   └── CD8T: CD8T
-└── myeloid: myeloid
-    └── Mono: Mono
-```
-
-| geometry | call |
-| --- | --- |
-| one identity topic per type + `m` shared (default) | `fit_hlda(adata, "cell_type", m)` |
-| identity sub-topics | `fit_hlda(adata, "cell_type", m, n_identity_topics={"CD4T": 2})` |
-| groups from a nested annotation | `fit_hlda(adata, ["lineage", "cell_type"], m)` |
-| groups given by hand (any depth) | `fit_hlda(adata, "cell_type", m, groups={"lymphoid": ["B", "T"], "T": ["CD4T", "CD8T"]})` |
-| topics per group | `n_group_topics=1` (default) or `{"lymphoid": 2, "T": 0}` |
-| no shared topics | `m = 0` |
-| anything else | `fit_hlda(adata, "cell_type", allowed=mask)` |
-
-`mask` is a boolean DataFrame with one row per cell type and one column per
-topic, named as the topics should be; a column allowed for a single type is an
-identity topic, any other is shared. With a list of annotation columns, a cell
-whose finer label is missing sits at its coarser node and uses that node's
-path only. Check a geometry before fitting:
+Start from the default table and edit it:
 
 ```python
-g = schlda.topic_geometry(adata, ["lineage", "cell_type"], 1)
+mask = schlda.allowed_topics(adata, "cell_type", n_activity_topics=1)
+#        B     CD4T   CD8T   Mono   V1
+# B      True  False  False  False  True
+# CD4T   False True   False  False  True
+# ...
+
+mask["lymphoid"] = mask.index.isin(["B", "CD4T", "CD8T"])   # program shared by lymphocytes only
+mask = mask.rename(columns={"CD4T": "CD4T_1"})                # two identity topics for CD4 T
+mask["CD4T_2"] = mask.index == "CD4T"
+
+g = schlda.topic_geometry(adata, "cell_type", allowed=mask)
 print(g.describe())
-g.allowed_frame()          # node x topic permission mask
+# B     (1,231 cells): B, V1, lymphoid
+# CD4T  (5,091 cells): CD4T_1, V1, lymphoid, CD4T_2
+# CD8T  (812 cells): CD8T, V1, lymphoid
+# Mono  (2,940 cells): Mono, V1
+# shared topics:
+#   V1 <- all
+#   lymphoid <- B, CD4T, CD8T
+
+res = schlda.fit_hlda(adata, "cell_type", allowed=mask)
 ```
 
-The identity concentration is split evenly over a type's sub-topics, so adding
-sub-topics does not change the prior weight on identity; group topics take
-`alpha_c`. `res.identity_share()` sums a cell's identity sub-topics.
+The table can also be edited in a spreadsheet:
+`mask.astype(int).to_csv("mask.csv")`, edit, then
+`allowed=pd.read_csv("mask.csv", index_col=0)` (0/1 is accepted). Column order
+is the topic order of the fit; rows for types absent from the data are ignored.
 
-A program used at a near-constant share by every cell of a group cannot be
-split between the group topic and that group's identity topics (the likelihood
-is flat along the split). Group topics are identified by cell-to-cell
-variation in their use, as activity topics are.
+The identity concentration (`alpha_c_identity` / `prior_scale_identity`) is
+split evenly over a type's identity topics, so giving a type several does not
+change its prior weight on identity; every activity topic takes `alpha_c`.
+`res.identity_share()` sums a cell's identity topics, and `res.allowed` returns
+the mask the fit used (also written to `allowed_topics.csv`).
 
+A program used at a near-constant share by every cell of the types that share
+it cannot be split between that shared topic and their identity topics (the
+likelihood is flat along the split). Shared topics are identified by
+cell-to-cell variation in their use.
+
+## Plot
 
 ```python
 schlda.structure_plot(res, save="structure.pdf")
