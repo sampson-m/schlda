@@ -1,8 +1,8 @@
 """Topic geometry: which topics each cell type may use.
 
 Default: one identity topic per cell type plus ``m`` activity topics ``V1 .. Vm`` shared by every cell.
-Custom: ``allowed``, a cell type x topic boolean DataFrame. A topic allowed for exactly one cell type is
-an identity topic of that type; any other is an activity (shared) topic.
+Custom: ``identity_topics`` (identity topics per cell type) and/or ``shared_topics`` (each shared topic and
+the cell types that may use it). Topic kinds are stated, never inferred; the permission mask is derived.
 """
 
 from __future__ import annotations
@@ -57,8 +57,12 @@ class TopicGeometry:
         return "\n".join(lines + (["shared topics:"] + shared if shared else []))
 
     def record(self):
-        names = np.array(self.topic_names)
-        return {"kind": self.kind, "allowed": {t: names[row].tolist() for t, row in zip(self.cell_types, self.allowed)}}
+        names, types = np.array(self.topic_names), np.array(self.cell_types)
+        is_id = self.identity_mask()
+        return {"kind": self.kind,
+                "identity_topics": {t: names[row & is_id].tolist() for t, row in zip(self.cell_types, self.allowed)},
+                "shared_topics": {k: types[col].tolist() for k, col, i in zip(names, self.allowed.T, is_id) if not i},
+                "allowed": {t: names[row].tolist() for t, row in zip(self.cell_types, self.allowed)}}
 
 
 def identity_order(labels):
@@ -81,58 +85,92 @@ def _labels(obs, cell_type_key):
     return lab
 
 
-def default_allowed(cell_types, n_activity_topics):
-    """The default mask: identity topic per type (named after it) and V1..Vm shared by all."""
-    types = [str(t) for t in cell_types]
-    m = pd.DataFrame(np.eye(len(types), dtype=bool), index=pd.Index(types, name="cell_type"), columns=types)
-    for i in range(n_activity_topics):
-        m[f"V{i + 1}"] = True
-    return m
+def _count(v, what):
+    if isinstance(v, (bool, np.bool_)) or not isinstance(v, (int, np.integer)):
+        raise TypeError(f"{what} must be an int, got {type(v).__name__}.")
+    if v < 0:
+        raise ValueError(f"{what} must be >= 0, got {v}.")
+    return int(v)
 
 
-def build_geometry(obs, cell_type_key, n_activity_topics=None, allowed=None):
+def _identity_names(types, spec):
+    """Identity topic names per cell type: one named after the type unless ``spec`` says otherwise."""
+    if spec is None:
+        spec = {}
+    if not isinstance(spec, dict):
+        raise TypeError("identity_topics must be a dict {cell type: number of topics or list of names}.")
+    spec = {str(k): v for k, v in spec.items()}
+    unknown = sorted(set(spec) - set(types))
+    if unknown:
+        raise ValueError(f"identity_topics names cell type(s) {unknown} not in the data. Cell types: {types}")
+    out = {}
+    for t in types:
+        v = spec.get(t, 1)
+        if isinstance(v, (list, tuple)):
+            if not all(isinstance(x, str) for x in v):
+                raise TypeError(f"identity_topics[{t!r}]: topic names must be strings.")
+            out[t] = list(v)
+        else:
+            n = _count(v, f"identity_topics[{t!r}]")
+            out[t] = [t] if n == 1 else [f"{t}_{j + 1}" for j in range(n)]
+    return out
+
+
+def _shared(types, n_activity_topics, spec):
+    """Shared topic name -> cell types that may use it."""
+    if spec is None:
+        if n_activity_topics is None:
+            raise TypeError("Give n_activity_topics or shared_topics.")
+        return {f"V{i + 1}": list(types) for i in range(_count(n_activity_topics, "n_activity_topics"))}
+    if n_activity_topics is not None:
+        raise ValueError("shared_topics replaces n_activity_topics; give one of them.")
+    if not isinstance(spec, dict):
+        raise TypeError('shared_topics must be a dict {topic name: "all" or list of cell types}.')
+    out = {}
+    for name, members in spec.items():
+        if isinstance(members, str):
+            if members != "all":
+                raise ValueError(f'shared_topics[{name!r}] must be "all" or a list of cell types '
+                                 f'(for one type write [{members!r}]).')
+            members = list(types)
+        elif isinstance(members, (list, tuple)):
+            members = [str(m) for m in members]
+            if not members or len(set(members)) != len(members):
+                raise ValueError(f"shared_topics[{name!r}] must list each cell type once, at least one.")
+            unknown = sorted(set(members) - set(types))
+            if unknown:
+                raise ValueError(f"shared_topics[{name!r}] names cell type(s) {unknown} not in the data. "
+                                 f"Cell types: {types}")
+        else:
+            raise TypeError(f'shared_topics[{name!r}] must be "all" or a list of cell types.')
+        out[str(name)] = members
+    return out
+
+
+def build_geometry(obs, cell_type_key, n_activity_topics=None, identity_topics=None, shared_topics=None):
     lab = _labels(obs, cell_type_key)
     types = [str(v) for v in identity_order(lab)]
-    if allowed is None:
-        if n_activity_topics is None:
-            raise TypeError("Give n_activity_topics (default geometry) or allowed (custom geometry).")
-        if isinstance(n_activity_topics, (bool, np.bool_)) or not isinstance(n_activity_topics, (int, np.integer)):
-            raise TypeError(f"n_activity_topics must be an int, got {type(n_activity_topics).__name__}.")
-        if n_activity_topics < 0:
-            raise ValueError(f"n_activity_topics must be >= 0, got {n_activity_topics}.")
-        n_act = int(n_activity_topics)
-        names = types + [f"V{i + 1}" for i in range(n_act)]
-        if len(set(names)) != len(names):
-            raise ValueError(f"Topic names are not unique: {names}. Cell type labels must "
-                             f"not collide with the activity topic names V1..V{n_act}.")
-        m, kind = default_allowed(types, n_act), "default"
-        topic_types = ["identity"] * len(types) + ["activity"] * n_act
-    else:
-        if n_activity_topics is not None:
-            raise ValueError("allowed replaces n_activity_topics; give one of them.")
-        m, kind = _check_mask(allowed, types), "custom"
-        topic_types = ["identity" if r == 1 else "activity" for r in m.sum(0)]
+    own = _identity_names(types, identity_topics)
+    shared = _shared(types, n_activity_topics, shared_topics)
+    names = [k for t in types for k in own[t]] + list(shared)
+    if len(set(names)) != len(names):
+        dup = sorted({k for k in names if names.count(k) > 1})
+        raise ValueError(f"Topic names {dup} are used more than once (cell type labels name their identity "
+                         f"topics, so they must not collide with shared topic names).")
+    allowed = np.zeros((len(types), len(names)), dtype=bool)
+    col = 0
+    for i, t in enumerate(types):
+        allowed[i, col:col + len(own[t])] = True
+        col += len(own[t])
+    for members in shared.values():
+        allowed[:, col] = [t in members for t in types]
+        col += 1
+    empty = [t for t, row in zip(types, allowed) if not row.any()]
+    if empty:
+        raise ValueError(f"Cell type(s) {empty} have no identity topic and no shared topic.")
+    n_id = sum(len(v) for v in own.values())
+    topic_types = ["identity"] * n_id + ["activity"] * len(shared)
+    kind = "default" if identity_topics is None and shared_topics is None else "custom"
     idx = {v: i for i, v in enumerate(types)}
     cell_node = np.array([idx[str(v)] for v in lab.to_numpy()], dtype=np.int32)
-    return TopicGeometry(kind, types, list(m.columns), topic_types, m.to_numpy(), cell_node, lab)
-
-
-def _check_mask(allowed, types):
-    if not isinstance(allowed, pd.DataFrame):
-        raise TypeError("allowed must be a DataFrame: one row per cell type, one boolean column per topic.")
-    m = allowed.copy()
-    m.index, m.columns = m.index.map(str), m.columns.map(str)
-    if m.index.duplicated().any() or m.columns.duplicated().any():
-        raise ValueError("allowed has duplicated cell type or topic names.")
-    if not all(pd.api.types.is_bool_dtype(t) or pd.api.types.is_integer_dtype(t) for t in m.dtypes) \
-            or not m.isin([0, 1]).all().all():
-        raise ValueError("allowed must hold booleans (or 0/1).")
-    missing = sorted(set(types) - set(m.index))
-    if missing:
-        raise ValueError(f"allowed has no row for cell type(s) {missing}.")
-    m = m.loc[types].astype(bool)
-    if not m.any(axis=0).all():
-        raise ValueError(f"Topic(s) {list(m.columns[~m.any(axis=0)])} are allowed for no cell type present.")
-    if not m.any(axis=1).all():
-        raise ValueError(f"Cell type(s) {list(m.index[~m.any(axis=1)])} may use no topic.")
-    return m
+    return TopicGeometry(kind, types, names, topic_types, allowed, cell_node, lab)

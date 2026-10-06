@@ -1,8 +1,8 @@
 """Hierarchical LDA for single-cell count data.
 
 By default one identity topic per annotated cell type, plus a set of activity
-topics that every cell may use; ``allowed`` sets any other cell type x topic
-permission mask (``_geometry``). A cell's tokens are only ever assigned to the
+topics that every cell may use; ``identity_topics`` and ``shared_topics`` set
+any other geometry (``_geometry``). A cell's tokens are only ever assigned to the
 topics its type may use.
 ``fit_hlda`` samples with the blocked kernel in ``_gibbs_blocked``; one thread
 is the exact collapsed Gibbs sampler.
@@ -23,7 +23,7 @@ from numba import config as numba_config, set_num_threads
 
 from . import _geometry, _gibbs, _gibbs_blocked, _init
 
-__all__ = ["fit_hlda", "HLDAResult", "topic_geometry", "allowed_topics"]
+__all__ = ["fit_hlda", "HLDAResult", "topic_geometry"]
 
 
 @dataclass
@@ -48,7 +48,7 @@ class HLDAResult:
     output_dir
         Where estimates and posterior samples were written.
     geometry
-        The cell type x topic mask the fit used; ``geometry.describe()`` prints it.
+        The topic geometry the fit used; ``geometry.describe()`` prints it.
     """
 
     theta: pd.DataFrame
@@ -69,7 +69,7 @@ class HLDAResult:
 
     @property
     def allowed(self) -> pd.DataFrame:
-        """Cell type x topic permission mask."""
+        """Cell type x topic permission mask derived from the geometry."""
         return self.geometry.allowed_frame()
 
     def identity_share(self) -> pd.Series:
@@ -85,23 +85,13 @@ class HLDAResult:
         )
 
 
-def allowed_topics(adata, cell_type_key, n_activity_topics=1):
-    """The default mask as a DataFrame to edit into a custom ``allowed``.
-
-    Rows are cell types, columns are topics: one identity topic per type
-    (named after it) and ``V1 .. Vm`` allowed for every type.
-    """
-    return _geometry.default_allowed(_geometry.identity_order(_geometry._labels(adata.obs, cell_type_key)),
-                                     n_activity_topics)
-
-
-def topic_geometry(adata, cell_type_key, n_activity_topics=None, *, allowed=None):
+def topic_geometry(adata, cell_type_key, n_activity_topics=None, *, identity_topics=None, shared_topics=None):
     """The topic geometry ``fit_hlda`` would use, without fitting.
 
     ``print(g.describe())`` lists each cell type's topics and which types share
     each activity topic; ``g.allowed_frame()`` is the permission mask.
     """
-    return _geometry.build_geometry(adata.obs, cell_type_key, n_activity_topics, allowed)
+    return _geometry.build_geometry(adata.obs, cell_type_key, n_activity_topics, identity_topics, shared_topics)
 
 
 def fit_hlda(
@@ -109,7 +99,8 @@ def fit_hlda(
     cell_type_key,
     n_activity_topics=None,
     *,
-    allowed=None,
+    identity_topics=None,
+    shared_topics=None,
     layer=None,
     output_dir=None,
     init="data_driven",
@@ -136,17 +127,19 @@ def fit_hlda(
     cell_type_key
         Column in ``adata.obs`` giving each cell's type. No missing values.
     n_activity_topics
-        Default geometry: every distinct cell type gets one identity topic,
-        and ``n_activity_topics`` activity topics ``V1 .. Vm`` (may be 0) are
-        shared by every cell. A cell's tokens may only use its own identity
+        Number of activity topics ``V1 .. Vm`` (may be 0) shared by every
+        cell. With the default ``identity_topics`` every cell type gets one
+        identity topic, and a cell's tokens may only use its own identity
         topic or the activity topics.
-    allowed
-        Custom geometry, replacing ``n_activity_topics``: a boolean DataFrame
-        with one row per cell type and one column per topic (column names are
-        the topic names, in fit order). A cell may use the topics its type's
-        row allows. A topic allowed for exactly one type is an identity topic
-        of that type; any other is an activity topic. Start from
-        ``schlda.allowed_topics(adata, cell_type_key, m)`` and edit it.
+    identity_topics
+        Dict ``{cell type: n}`` or ``{cell type: [names]}`` giving a type
+        several identity topics (``n`` > 1 names them ``<type>_1 .. <type>_n``)
+        or none (0). Types not listed get one, named after the type.
+    shared_topics
+        Dict ``{topic name: "all" or [cell types]}``, replacing
+        ``n_activity_topics``: each activity topic and the cell types that may
+        use it, in fit order. One type is allowed (a type-specific program kept
+        separate from that type's identity).
     layer
         Layer to read counts from, e.g. ``"counts"``. Defaults to ``adata.X``.
     output_dir
@@ -171,7 +164,7 @@ def fit_hlda(
         on ``adata.obs_names``).
     alpha_c_identity
         Concentration on the cell's identity, float or one value per cell,
-        split evenly over its type's identity topics when a custom ``allowed``
+        split evenly over its type's identity topics when ``identity_topics``
         gives it several. Defaults to ``alpha_c``.
     prior_scale_identity
         ``kappa``: identity concentration ``kappa * L_i``, with ``L_i`` the
@@ -216,7 +209,8 @@ def fit_hlda(
             raise ValueError(f"prior_scale_identity must be a positive number, got {prior_scale_identity!r}.")
 
     counts = _get_counts(adata, layer)
-    geom = topic_geometry(adata, cell_type_key, n_activity_topics, allowed=allowed)
+    geom = topic_geometry(adata, cell_type_key, n_activity_topics,
+                          identity_topics=identity_topics, shared_topics=shared_topics)
     labels = geom.labels
     topic_names = list(geom.topic_names)
     topic_types = list(geom.topic_types)

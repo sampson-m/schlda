@@ -9,6 +9,10 @@ topics, so identity topics stay pinned to the annotation and the activity topics
 are left to pick up programs that cut across cell types — cell cycle, interferon
 response, and so on.
 
+Other geometries — several identity topics for a type, or programs shared by
+only some types — are set with `identity_topics` and `shared_topics` (see
+[Topic geometry](#topic-geometry)).
+
 ## Install
 
 ```bash
@@ -174,48 +178,53 @@ p(z = k | ...)  ∝  (alpha_beta + A_gk) / (G * alpha_beta + B_k)  *  (alpha_ik 
 
 ## Topic geometry
 
-Two choices. The default, `n_activity_topics=m`, gives each cell type one
-identity topic and shares `V1 … Vm` across every cell. For anything else pass
-`allowed`: a boolean DataFrame with one row per cell type and one column per
-topic, saying which topics each type may use. A topic allowed for exactly one
-type is an identity topic of that type; any other is an activity topic.
+By default (`n_activity_topics=m`) each cell type gets one identity topic, named
+after the type, and `V1 … Vm` are shared by every cell. Two arguments change
+that, and each topic's kind is set by which argument names it:
 
-Start from the default table and edit it:
+| argument | form | sets |
+| --- | --- | --- |
+| `identity_topics` | `{cell type: n}` or `{cell type: [names]}` | identity topics of a type; unlisted types get one, `n > 1` names them `<type>_1 … <type>_n`, `0` gives none |
+| `shared_topics` | `{topic name: "all"}` or `{topic name: [cell types]}` | activity topics and the types that may use each, in fit order; replaces `n_activity_topics` |
 
 ```python
-mask = schlda.allowed_topics(adata, "cell_type", n_activity_topics=1)
-#        B     CD4T   CD8T   Mono   V1
-# B      True  False  False  False  True
-# CD4T   False True   False  False  True
-# ...
+res = schlda.fit_hlda(
+    adata, "cell_type",
+    identity_topics={"CD4T": 2},                      # CD4T_1, CD4T_2
+    shared_topics={"V1": "all",                       # every cell
+                   "lymphoid": ["B", "CD4T", "CD8T"], # lymphocytes only
+                   "mono_act": ["Mono"]},             # one type, kept apart from Mono's identity
+    layer="counts", output_dir="results/pbmc_geo", seed=0,
+)
+```
 
-mask["lymphoid"] = mask.index.isin(["B", "CD4T", "CD8T"])   # program shared by lymphocytes only
-mask = mask.rename(columns={"CD4T": "CD4T_1"})                # two identity topics for CD4 T
-mask["CD4T_2"] = mask.index == "CD4T"
+`identity_topics` also combines with `n_activity_topics`
+(`fit_hlda(adata, "cell_type", 2, identity_topics={"CD4T": 2})`). Preview a
+geometry without fitting:
 
-g = schlda.topic_geometry(adata, "cell_type", allowed=mask)
+```python
+g = schlda.topic_geometry(adata, "cell_type", identity_topics={"CD4T": 2},
+                          shared_topics={"V1": "all", "lymphoid": ["B", "CD4T", "CD8T"]})
 print(g.describe())
 # B     (1,231 cells): B, V1, lymphoid
-# CD4T  (5,091 cells): CD4T_1, V1, lymphoid, CD4T_2
+# CD4T  (5,091 cells): CD4T_1, CD4T_2, V1, lymphoid
 # CD8T  (812 cells): CD8T, V1, lymphoid
 # Mono  (2,940 cells): Mono, V1
 # shared topics:
 #   V1 <- all
 #   lymphoid <- B, CD4T, CD8T
-
-res = schlda.fit_hlda(adata, "cell_type", allowed=mask)
 ```
 
-The table can also be edited in a spreadsheet:
-`mask.astype(int).to_csv("mask.csv")`, edit, then
-`allowed=pd.read_csv("mask.csv", index_col=0)` (0/1 is accepted). Column order
-is the topic order of the fit; rows for types absent from the data are ignored.
+Topic order is identity topics (cell type order, each type's together) then
+shared topics. Every cell type named must be in the data, topic names must be
+unique, and every type needs at least one topic.
 
 The identity concentration (`alpha_c_identity` / `prior_scale_identity`) is
 split evenly over a type's identity topics, so giving a type several does not
-change its prior weight on identity; every activity topic takes `alpha_c`.
-`res.identity_share()` sums a cell's identity topics, and `res.allowed` returns
-the mask the fit used (also written to `allowed_topics.csv`).
+change its prior weight on identity; every shared topic takes `alpha_c`.
+`res.identity_share()` sums a cell's identity topics. `res.allowed` is the
+derived cell type x topic permission mask (also written to
+`allowed_topics.csv`), and `res.params["geometry"]` records both arguments.
 
 A program used at a near-constant share by every cell of the types that share
 it cannot be split between that shared topic and their identity topics (the

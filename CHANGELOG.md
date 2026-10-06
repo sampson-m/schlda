@@ -1,21 +1,21 @@
 # Changelog
 
-## 0.5.0 — 2026-10-01
+## 0.5.0 — 2026-10-06
 
-- Custom topic geometry: `fit_hlda(..., allowed=mask)` takes a cell type x
-  topic boolean DataFrame saying which topics each type may use (identity
-  sub-topics, programs shared by a subset of types, any other pattern). A
-  topic allowed for exactly one type is an identity topic; any other is an
-  activity topic. `n_activity_topics` (the default geometry) is unchanged.
-- `allowed_topics(adata, key, m)` returns the default mask to edit;
-  `topic_geometry(...)` previews a geometry without fitting (`describe()`,
+- Custom topic geometry: `fit_hlda(..., identity_topics=, shared_topics=)`.
+  `identity_topics={type: n or [names]}` gives a type several identity topics
+  (or none); `shared_topics={name: "all" or [types]}` lists the activity topics
+  and the types that may use each, replacing `n_activity_topics`. Topic kinds
+  are stated by the argument, never inferred.
+- `topic_geometry(...)` previews a geometry without fitting (`describe()`,
   `allowed_frame()`).
 - The identity concentration is split evenly over a type's identity topics.
-- `allowed_topics.csv` is written with every fit; `HLDAResult` gains
-  `geometry`, `allowed` and `identity_share()`.
+- `allowed_topics.csv` (the derived cell type x topic mask) is written with
+  every fit; `HLDAResult` gains `geometry`, `allowed` and `identity_share()`;
+  `params["geometry"]` records `identity_topics` and `shared_topics`.
 - The sampler kernel is unchanged. The default geometry reproduces v0.4.0 fits
-  exactly at a fixed seed (`tests/data/golden_v040.npz`), also when passed as
-  the equivalent `allowed` mask.
+  exactly at a fixed seed (`tests/data/golden_v040.npz`), also when given as
+  the equivalent `identity_topics` / `shared_topics`.
 
 ## 0.4.0 — 2026-09-29
 

@@ -125,6 +125,22 @@ res_par = schlda.fit_hlda(
 )
 print(f"\ntwo-thread fit: {res_par}  ({res_par.params['seconds_per_sweep']:.3f} s/sweep)")
 
+# ── 3c. A custom topic geometry ───────────────────────────────────────────
+# identity_topics gives a type several identity topics; shared_topics lists
+# each activity topic and the types that may use it ("all" or a list). Topic
+# kinds are set by which argument names them. Preview first, then fit.
+
+geo = dict(identity_topics={"T_cell": 2},
+           shared_topics={"stress": "all", "lymphoid": ["T_cell", "B_cell", "NK_cell"]})
+print(schlda.topic_geometry(adata, "cell_type", **geo).describe())
+res_geo = schlda.fit_hlda(adata, "cell_type", **geo, layer="counts", output_dir=OUT / "geometry",
+                          n_loops=600, burn_in=300, thin=10, seed=0, verbose=False)
+print(f"\ncustom geometry: {res_geo}")
+print(f"cos(stress topic, true stress program) = "
+      f"{float(res_geo.beta['stress'] @ programs['stress'] / np.linalg.norm(res_geo.beta['stress']) / np.linalg.norm(programs['stress'])):.3f}")
+print(f"Monocyte cells never use 'lymphoid': "
+      f"{(res_geo.theta.loc[adata.obs.cell_type == 'Monocyte', 'lymphoid'] == 0).all()}\n")
+
 # ── 4. Inspect ─────────────────────────────────────────────────────────────
 # beta is genes x topics: the top genes of a topic say what it represents.
 
