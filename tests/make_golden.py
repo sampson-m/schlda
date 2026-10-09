@@ -15,10 +15,11 @@ CASES = {
     "random_m2_t2": dict(n_activity_topics=2, init="random", n_threads=2),
     "random_m0_t1": dict(n_activity_topics=0, init="random", n_threads=1),
     "data_m1_t1": dict(n_activity_topics=1, init="data_driven", n_threads=1),
-    "data_m2_t2_kappa": dict(n_activity_topics=2, init="data_driven", n_threads=2, prior_scale_identity=0.1),
-    "data_m3_t1_vec": dict(n_activity_topics=3, init="data_driven", n_threads=1, alpha_c=0.3,
-                           alpha_c_identity=np.linspace(0.5, 5.0, 180)),
 }
+# v0.4.0 fits used alpha 0.1 on every topic; 0.6.0 defaults to alpha_identity = 1, so the golden runs pass it.
+# The v0.4.0 cases with a depth-scaled or per-cell prior (data_m2_t2_kappa, data_m3_t1_vec) are no longer
+# expressible and are not checked.
+RUN = dict(RUN, alpha_identity=0.1)
 
 
 def run(name, out):

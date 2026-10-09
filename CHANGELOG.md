@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.6.0 — 2026-10-09
+
+- One geometry object. `schlda.geometry(adata, "cell_type")` returns the
+  default geometry (one identity topic per cell type, nothing shared), edited
+  in place with `split`, `share`, `drop` and `alpha`; `fit_hlda(..., geometry=g)`
+  fits it. `n_activity_topics=m` remains the shortcut for `V1 .. Vm`.
+- The geometry is a table (`g.to_frame()` / `g.to_csv()`; columns `topic,
+  kind, cell_types, alpha`) that `geometry=` also accepts as a DataFrame or CSV
+  path; every fit writes it as `topics.csv` (replacing `topic_info.csv` and
+  `allowed_topics.csv`). `res.topics` is this table.
+- The theta prior lives in the geometry: `alpha_identity` (default **1.0**,
+  split evenly over a type's identity topics) and `alpha_activity` (default
+  0.1) fill the `alpha` column by kind, and `g.alpha(name, value)` overrides
+  one topic. Default changed from 0.1 on every topic: pass `alpha_identity=0.1`
+  to reproduce 0.4/0.5 fits.
+- Removed: `prior_scale_identity` (depth-scaled prior), per-cell `alpha_c` /
+  `alpha_c_identity`, `theta_prior.csv`, `topic_geometry`, `fit_hlda`'s
+  `identity_topics` / `shared_topics` (now arguments of `schlda.geometry`),
+  `HLDAResult.identity_share`. Scalar `alpha_c` / `alpha_c_identity` still
+  work with a `DeprecationWarning`.
+- Kinds are `identity` and `activity` only; an activity topic restricted to one
+  cell type is activity and takes `alpha_activity`.
+
 ## 0.5.0 — 2026-10-06
 
 - Custom topic geometry: `fit_hlda(..., identity_topics=, shared_topics=)`.

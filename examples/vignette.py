@@ -104,11 +104,9 @@ print(f"\n{res}")
 print(f"identity topics: {res.identity_topics}")
 print(f"activity topics: {res.activity_topics}\n")
 
-# ── 3b. The same fit on two threads with the depth-scaled identity prior ──
+# ── 3b. The same fit on two threads ───────────────────────────────────────
 # n_threads splits the cells into blocks swept concurrently (1 = the exact
-# serial sampler). prior_scale_identity=0.1 gives each cell an identity
-# concentration of 0.1 x its token count; alpha_c / alpha_c_identity also
-# accept one value per cell.
+# serial sampler). alpha_identity / alpha_activity set the theta prior.
 
 res_par = schlda.fit_hlda(
     adata,
@@ -121,19 +119,19 @@ res_par = schlda.fit_hlda(
     thin=10,
     seed=0,
     n_threads=2,
-    prior_scale_identity=0.1,
+    alpha_identity=1.0,
 )
 print(f"\ntwo-thread fit: {res_par}  ({res_par.params['seconds_per_sweep']:.3f} s/sweep)")
 
 # ── 3c. A custom topic geometry ───────────────────────────────────────────
-# identity_topics gives a type several identity topics; shared_topics lists
-# each activity topic and the types that may use it ("all" or a list). Topic
-# kinds are set by which argument names them. Preview first, then fit.
+# schlda.geometry gives one identity topic per type; split() adds identity
+# sub-topics, share() adds an activity topic for every type or a list of
+# types. Preview with describe(), then pass it as geometry=.
 
-geo = dict(identity_topics={"T_cell": 2},
-           shared_topics={"stress": "all", "lymphoid": ["T_cell", "B_cell", "NK_cell"]})
-print(schlda.topic_geometry(adata, "cell_type", **geo).describe())
-res_geo = schlda.fit_hlda(adata, "cell_type", **geo, layer="counts", output_dir=OUT / "geometry",
+geo = schlda.geometry(adata, "cell_type").split("T_cell", 2).share("stress") \
+    .share("lymphoid", ["T_cell", "B_cell", "NK_cell"])
+print(geo.describe())
+res_geo = schlda.fit_hlda(adata, "cell_type", geometry=geo, layer="counts", output_dir=OUT / "geometry",
                           n_loops=600, burn_in=300, thin=10, seed=0, verbose=False)
 print(f"\ncustom geometry: {res_geo}")
 print(f"cos(stress topic, true stress program) = "

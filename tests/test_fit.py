@@ -52,9 +52,9 @@ def test_fit_recovers_program(tmp_path, n_threads):
     for t in TYPES:  # a cell never uses another type's identity topic
         other = [u for u in TYPES if u != t]
         assert (res.theta.loc[a.obs["cell_type"] == t, other].to_numpy() == 0).all()
-    assert res.params["prior"] == "fixed" and res.params["n_threads"] >= 1
+    assert res.params["alpha_identity"] == 1.0 and res.params["n_threads"] >= 1
     assert (tmp_path / f"t{n_threads}" / "HLDA_beta.csv").exists()
-    assert not (tmp_path / f"t{n_threads}" / "theta_prior.csv").exists()
+    assert res.topics.columns.tolist() == ["topic", "kind", "cell_types", "alpha"]
     assert a.obsm["schlda_theta"].shape == (a.n_obs, 4)
 
 
@@ -66,52 +66,32 @@ def test_reproducible(tmp_path):
     assert r1.params["seed"] == 7
 
 
-def test_constant_vector_equals_scalar(tmp_path):
+def test_alpha_identity_moves_identity_share(tmp_path):
+    a, act, _ = simulate()
+    lo = schlda.fit_hlda(a, "cell_type", 1, output_dir=tmp_path / "lo", alpha_identity=0.1, **FIT)
+    hi = schlda.fit_hlda(a, "cell_type", 1, output_dir=tmp_path / "hi", alpha_identity=50.0, **FIT)
+    assert ident(hi, a).mean() > ident(lo, a).mean()
+    assert hi.params["alpha_identity"] == 50.0 and hi.params["alpha_activity"] == 0.1
+    assert cos(lo.beta["V1"].to_numpy(), act) > 0.9
+    assert pd.read_csv(tmp_path / "hi" / "topics.csv").alpha.tolist() == [50, 50, 50, 0.1]
+
+
+def test_legacy_prior_arguments(tmp_path):
     a, _, _ = simulate()
-    s = schlda.fit_hlda(a, "cell_type", 1, output_dir=tmp_path / "s", alpha_c=0.3, alpha_c_identity=2.0, **SHORT)
-    v = schlda.fit_hlda(a, "cell_type", 1, output_dir=tmp_path / "v", alpha_c=np.full(a.n_obs, 0.3),
-                        alpha_c_identity=pd.Series(2.0, index=a.obs_names[::-1]), **SHORT)
-    assert np.array_equal(s.theta.to_numpy(), v.theta.to_numpy())
-    assert s.params["prior"] == "fixed" and s.params["alpha_c_identity"] == 2.0
-    assert v.params["prior"] == "per_cell" and v.params["alpha_c"] == "per_cell"
-    tp = pd.read_csv(tmp_path / "v" / "theta_prior.csv", index_col=0)
-    assert list(tp.columns) == ["identity", "activity"] and np.allclose(tp.identity, 2.0) and np.allclose(tp.activity, 0.3)
-
-
-def test_vector_identity_with_scalar_activity(tmp_path):
-    a, act, _ = simulate()
-    vec = np.where(a.obs["cell_type"] == "A", 50.0, 0.1)
-    r = schlda.fit_hlda(a, "cell_type", 1, output_dir=tmp_path / "v", alpha_c=1.0, alpha_c_identity=vec, **FIT)
-    base = schlda.fit_hlda(a, "cell_type", 1, output_dir=tmp_path / "b", alpha_c=1.0, **FIT)
-    in_a = (a.obs["cell_type"] == "A").to_numpy()
-    assert ident(r, a)[in_a].mean() > ident(base, a)[in_a].mean()
-    tp = pd.read_csv(tmp_path / "v" / "theta_prior.csv", index_col=0)
-    assert np.allclose(tp.identity.to_numpy(), vec) and np.allclose(tp.activity, 1.0)
-
-
-def test_identity_depth_scaled_prior(tmp_path):
-    a, act, _ = simulate()
-    fixed = schlda.fit_hlda(a, "cell_type", 1, output_dir=tmp_path / "f", **FIT)
-    for n_threads in (1, 2):
-        r = schlda.fit_hlda(a, "cell_type", 1, output_dir=tmp_path / f"k{n_threads}", prior_scale_identity=0.1,
-                            n_threads=n_threads, **FIT)
-        assert ident(r, a).mean() > ident(fixed, a).mean()
-        assert r.params["prior"] == "identity_depth_scaled" and r.params["prior_scale_identity"] == 0.1
-        assert r.params["alpha_c_identity"] is None and r.params["alpha_c"] == 0.1
-        assert cos(r.beta["V1"].to_numpy(), act) > 0.9
-    tp = pd.read_csv(tmp_path / "k1" / "theta_prior.csv", index_col=0)
-    L = np.asarray(a.X.sum(1)).ravel()
-    assert np.allclose(tp.identity.to_numpy(), 0.1 * L)
+    with pytest.warns(DeprecationWarning):
+        old = schlda.fit_hlda(a, "cell_type", 1, output_dir=tmp_path / "o", alpha_c=0.3, alpha_c_identity=2.0, **SHORT)
+    new = schlda.fit_hlda(a, "cell_type", 1, output_dir=tmp_path / "n", alpha_activity=0.3, alpha_identity=2.0, **SHORT)
+    assert np.array_equal(old.theta.to_numpy(), new.theta.to_numpy())
+    for kw in (dict(prior_scale_identity=0.1), dict(alpha_c_identity=np.ones(a.n_obs)), dict(bogus=1)):
+        with pytest.raises(TypeError):
+            schlda.fit_hlda(a, "cell_type", 1, output_dir=tmp_path / "x", **SHORT, **kw)
 
 
 @pytest.mark.parametrize("kw", [
-    dict(alpha_c=np.ones(5)),
-    dict(alpha_c_identity=np.r_[np.ones(179), 0.0]),
-    dict(alpha_c=np.r_[np.ones(179), np.nan]),
-    dict(alpha_c_identity=pd.Series(1.0, index=["c0", "c1"])),
-    dict(alpha_c=-1.0),
-    dict(prior_scale_identity=0.1, alpha_c_identity=1.0),
-    dict(prior_scale_identity=0.0),
+    dict(alpha_activity=-1.0),
+    dict(alpha_identity=0.0),
+    dict(alpha_identity=np.nan),
+    dict(alpha_beta=np.ones(5)),
 ])
 def test_prior_errors(tmp_path, kw):
     a, _, _ = simulate()

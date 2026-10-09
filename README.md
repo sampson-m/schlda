@@ -10,7 +10,7 @@ are left to pick up programs that cut across cell types — cell cycle, interfer
 response, and so on.
 
 Other geometries — several identity topics for a type, or programs shared by
-only some types — are set with `identity_topics` and `shared_topics` (see
+only some types — are built with `schlda.geometry` (see
 [Topic geometry](#topic-geometry)).
 
 ## Install
@@ -38,7 +38,7 @@ res = schlda.fit_hlda(
 
 res.theta              # cells x topics, rows sum to 1
 res.beta               # genes x topics, columns sum to 1
-res.topics             # topic_id / topic_name / topic_type
+res.topics             # topic / kind / cell_types / alpha
 res.activity_topics    # ['V1', 'V2']
 ```
 
@@ -63,14 +63,13 @@ Use `key_added` to fit several models into one object.
 ```
 HLDA_beta.csv           genes x topics posterior mean
 HLDA_theta.csv          cells x topics posterior mean
-topic_info.csv          topic_id, topic_name, topic_type
-allowed_topics.csv      cell type x topic 0/1 mask of permitted topics
+topics.csv              the geometry: topic, kind, cell_types, alpha
 samples/A_chain.memmap  (n_save, n_genes, n_topics) int32 gene-topic counts
 samples/D_chain.memmap  (n_save, n_cells, n_topics) int32 cell-topic counts
 samples/samples_meta.json   shapes, topic names, run parameters
-theta_prior.csv         cells x (identity, activity) prior concentrations used
-                        (written when a vector or prior_scale_identity is given)
 ```
+
+`topics.csv` can be passed back as `geometry=` to refit the same geometry.
 
 Omitting `output_dir` writes to `./schlda_output` and warns. Reload the chains
 for convergence diagnostics using the shapes in the sidecar:
@@ -102,9 +101,8 @@ to use.
 | `thin` | 30 | sweeps between kept draws |
 | `n_threads` | 1 | threads per sweep (see [Threads](#threads)) |
 | `alpha_beta` | 0.1 | Dirichlet concentration on gene distributions |
-| `alpha_c` | 0.1 | activity topic concentration: float or one value per cell (see [Theta prior](#theta-prior)) |
-| `alpha_c_identity` | `alpha_c` | identity topic concentration: float or one value per cell |
-| `prior_scale_identity` | `None` | `kappa`: identity concentration `kappa * L_i`; replaces `alpha_c_identity` |
+| `alpha_identity` | 1.0 | concentration on a cell's identity (see [Theta prior](#theta-prior)) |
+| `alpha_activity` | 0.1 | concentration on each activity topic |
 | `seed` | `None` | seeds init and the chain |
 | `report_every` | 100 | sweeps between progress lines |
 
@@ -131,80 +129,57 @@ res = schlda.fit_hlda(adata, "cell_type", n_activity_topics=2, layer="counts",
 
 ### Theta prior
 
-A cell `i` may use its own identity topic and the activity topics `V1 … Vm`.
-Its topic usage has the Dirichlet prior
+A cell `i` of type `c` may use the topics `A(c)` its type is allowed (its
+identity topic(s) and the activity topics it shares). Its topic usage has the
+Dirichlet prior
 
 ```
-theta_i ~ Dirichlet(alpha_i,identity, alpha_i,1, ..., alpha_i,m)
+theta_i ~ Dirichlet(alpha_k : k in A(c))
+alpha_k = alpha_identity / n_identity(c)   for an identity topic of type c
+alpha_k = alpha_activity                   for an activity topic
 ```
 
-set in one of three ways:
-
-| argument | accepts | sets |
-| --- | --- | --- |
-| `alpha_c` | float, or array / Series with one value per cell | every activity topic: `alpha_i,1 = … = alpha_i,m` |
-| `alpha_c_identity` | float, or array / Series with one value per cell | `alpha_i,identity` (default: `alpha_c`) |
-| `prior_scale_identity` | float `kappa` | `alpha_i,identity = kappa * L_i`, `L_i` = the cell's UMI count |
-
-An array follows the row order of `adata`; a Series is aligned on
-`adata.obs_names`. Values must be positive. `prior_scale_identity` replaces
-`alpha_c_identity`, so the two cannot be combined.
+so the prior is part of the geometry: `res.topics` / `topics.csv` list the
+`alpha` of every topic, and `g.alpha(name, value)` overrides one. With the
+defaults a cell of a type with one identity topic and `m` activity topics has
+prior mean identity share `1 / (1 + 0.1 m)`; `alpha_identity = 1` is the
+smallest value whose density stays bounded at zero identity, so the prior
+itself never pushes a cell off its identity topic. The prior counts as
+`alpha` pseudo-tokens against the cell's `L_i` real ones, so at typical depths
+it only matters for cells whose data leave the split undecided.
 
 ```python
-schlda.fit_hlda(adata, "cell_type", 1, alpha_c_identity=50)          # fixed, every cell
-schlda.fit_hlda(adata, "cell_type", 1, alpha_c_identity=adata.obs["a_id"],
-                alpha_c=1.0)                                          # one value per cell
-schlda.fit_hlda(adata, "cell_type", 1, prior_scale_identity=0.1)     # depth-scaled
+schlda.fit_hlda(adata, "cell_type", 1, alpha_identity=5.0)              # lean harder on identity
+g = schlda.geometry(adata, "cell_type", 2).alpha("V2", 0.01)             # one sparse activity topic
+schlda.fit_hlda(adata, "cell_type", geometry=g)
 ```
-
-The prior mean of the identity share is
-`alpha_i,identity / (alpha_i,identity + m * alpha_c)`. How much it moves a cell
-depends on depth, because the prior counts as `alpha` pseudo-tokens against
-`L_i` real ones. A fixed value dominates shallow cells and barely touches deep
-ones; `prior_scale_identity` keeps the same share at every depth:
-
-| `L_i` | `alpha_c_identity=50` | `prior_scale_identity=0.1` |
-| --- | --- | --- |
-| 100 | 50 / 150 = 33 % | 10 / 110 = 9 % |
-| 600 | 50 / 650 = 8 % | 60 / 660 = 9 % |
-| 3000 | 50 / 3050 = 1.6 % | 300 / 3300 = 9 % |
 
 Nothing is truncated: `theta` is still the pooled frequency of the retained
 assignments, and the prior acts only through each token's conditional,
 
 ```
-p(z = k | ...)  ∝  (alpha_beta + A_gk) / (G * alpha_beta + B_k)  *  (alpha_ik + D_ik)
+p(z = k | ...)  ∝  (alpha_beta + A_gk) / (G * alpha_beta + B_k)  *  (alpha_k + D_ik)
 ```
 
 ## Topic geometry
 
-By default (`n_activity_topics=m`) each cell type gets one identity topic, named
-after the type, and `V1 … Vm` are shared by every cell. Two arguments change
-that, and each topic's kind is set by which argument names it:
+`n_activity_topics=m` gives every cell type one identity topic, named after the
+type, plus `V1 … Vm` shared by every cell. Anything else starts from
+`schlda.geometry(adata, "cell_type")` — one identity topic per cell type and
+nothing shared — and is edited in place:
 
-| argument | form | sets |
-| --- | --- | --- |
-| `identity_topics` | `{cell type: n}` or `{cell type: [names]}` | identity topics of a type; unlisted types get one, `n > 1` names them `<type>_1 … <type>_n`, `0` gives none |
-| `shared_topics` | `{topic name: "all"}` or `{topic name: [cell types]}` | activity topics and the types that may use each, in fit order; replaces `n_activity_topics` |
-
-```python
-res = schlda.fit_hlda(
-    adata, "cell_type",
-    identity_topics={"CD4T": 2},                      # CD4T_1, CD4T_2
-    shared_topics={"V1": "all",                       # every cell
-                   "lymphoid": ["B", "CD4T", "CD8T"], # lymphocytes only
-                   "mono_act": ["Mono"]},             # one type, kept apart from Mono's identity
-    layer="counts", output_dir="results/pbmc_geo", seed=0,
-)
-```
-
-`identity_topics` also combines with `n_activity_topics`
-(`fit_hlda(adata, "cell_type", 2, identity_topics={"CD4T": 2})`). Preview a
-geometry without fitting:
+| method | effect |
+| --- | --- |
+| `g.split(type, n)` / `g.split(type, [names])` | `n` identity topics for `type` (`<type>_1 … <type>_n`), or the names given; `0` removes them |
+| `g.share(name)` / `g.share(name, [types])` | an activity topic used by every type, or by the listed types only |
+| `g.drop(name)` | remove a topic |
+| `g.alpha(name, value)` | that topic's concentration (default by kind, see [Theta prior](#theta-prior)) |
 
 ```python
-g = schlda.topic_geometry(adata, "cell_type", identity_topics={"CD4T": 2},
-                          shared_topics={"V1": "all", "lymphoid": ["B", "CD4T", "CD8T"]})
+g = schlda.geometry(adata, "cell_type")
+g.split("CD4T", 2)                                   # CD4T_1, CD4T_2
+g.share("V1")                                        # every cell
+g.share("lymphoid", ["B", "CD4T", "CD8T"])           # lymphocytes only
 print(g.describe())
 # B     (1,231 cells): B, V1, lymphoid
 # CD4T  (5,091 cells): CD4T_1, CD4T_2, V1, lymphoid
@@ -213,18 +188,41 @@ print(g.describe())
 # shared topics:
 #   V1 <- all
 #   lymphoid <- B, CD4T, CD8T
+
+res = schlda.fit_hlda(adata, "cell_type", geometry=g, layer="counts",
+                      output_dir="results/pbmc_geo", seed=0)
 ```
 
-Topic order is identity topics (cell type order, each type's together) then
-shared topics. Every cell type named must be in the data, topic names must be
-unique, and every type needs at least one topic.
+Every topic is `identity` (owned by one cell type) or `activity` (shared by
+the types listed, possibly a single one). An activity topic restricted to one
+type is still an activity topic: it takes `alpha_activity`, not a share of the
+type's identity concentration.
 
-The identity concentration (`alpha_c_identity` / `prior_scale_identity`) is
-split evenly over a type's identity topics, so giving a type several does not
-change its prior weight on identity; every shared topic takes `alpha_c`.
-`res.identity_share()` sums a cell's identity topics. `res.allowed` is the
-derived cell type x topic permission mask (also written to
-`allowed_topics.csv`), and `res.params["geometry"]` records both arguments.
+The geometry is a table, `g.to_frame()`:
+
+| topic | kind | cell_types | alpha |
+| --- | --- | --- | --- |
+| B | identity | B | |
+| CD4T_1 | identity | CD4T | |
+| CD4T_2 | identity | CD4T | |
+| CD8T | identity | CD8T | |
+| Mono | identity | Mono | |
+| V1 | activity | all | |
+| lymphoid | activity | B; CD4T; CD8T | |
+
+An empty `alpha` means the kind's default. The table can be edited as a
+DataFrame or CSV and passed as `geometry=` (`g.to_csv(path)`;
+`schlda.geometry(adata, "cell_type", topics=path)` reads it back), and every
+fit writes its own as `topics.csv` with the `alpha` values used. The dict
+shortcuts `identity_topics={type: n or [names]}` and
+`shared_topics={name: "all" or [types]}` build the same thing:
+`schlda.geometry(adata, "cell_type", identity_topics={"CD4T": 2}, shared_topics={"V1": "all", "lymphoid": [...]})`.
+
+Topic order is identity topics (cell type order, each type's together) then
+activity topics in the order added. Topic names must be unique, every type
+needs at least one topic, and the geometry's cell types must be those of the
+column the fit conditions on (`res.allowed` is the derived cell type x topic
+mask).
 
 A program used at a near-constant share by every cell of the types that share
 it cannot be split between that shared topic and their identity topics (the

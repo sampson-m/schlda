@@ -17,8 +17,8 @@ the same way and compared on a shared cell order (see ``cell_order``).
 """
 
 from ._geometry import TopicGeometry
-from .model import HLDAResult, fit_hlda, topic_geometry
+from .model import HLDAResult, fit_hlda, geometry
 from .plotting import cell_order, structure_plot, theta_heatmap
 
-__all__ = ["fit_hlda", "topic_geometry", "TopicGeometry", "HLDAResult", "structure_plot", "theta_heatmap", "cell_order"]
-__version__ = "0.5.0"
+__all__ = ["fit_hlda", "geometry", "TopicGeometry", "HLDAResult", "structure_plot", "theta_heatmap", "cell_order"]
+__version__ = "0.6.0"

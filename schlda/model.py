@@ -1,9 +1,9 @@
 """Hierarchical LDA for single-cell count data.
 
 By default one identity topic per annotated cell type, plus a set of activity
-topics that every cell may use; ``identity_topics`` and ``shared_topics`` set
-any other geometry (``_geometry``). A cell's tokens are only ever assigned to the
-topics its type may use.
+topics that every cell may use; ``geometry(adata, key)`` builds any other
+geometry (``_geometry``). A cell's tokens are only ever assigned to the topics
+its type may use.
 ``fit_hlda`` samples with the blocked kernel in ``_gibbs_blocked``; one thread
 is the exact collapsed Gibbs sampler.
 """
@@ -23,7 +23,7 @@ from numba import config as numba_config, set_num_threads
 
 from . import _geometry, _gibbs, _gibbs_blocked, _init
 
-__all__ = ["fit_hlda", "HLDAResult", "topic_geometry"]
+__all__ = ["fit_hlda", "HLDAResult", "geometry"]
 
 
 @dataclass
@@ -39,8 +39,8 @@ class HLDAResult:
         Genes x topics posterior mean, columns summing to 1. Indexed by
         ``adata.var_names``.
     topics
-        One row per topic with ``topic_id``, ``topic_name`` and ``topic_type``
-        (``identity`` or ``activity``).
+        The geometry table: ``topic``, ``kind`` (``identity`` or ``activity``),
+        ``cell_types`` and the ``alpha`` used.
     cell_types
         The annotation the fit was conditioned on, aligned to ``theta``.
     params
@@ -61,20 +61,16 @@ class HLDAResult:
 
     @property
     def identity_topics(self) -> list[str]:
-        return self.topics.loc[self.topics.topic_type == "identity", "topic_name"].tolist()
+        return self.topics.loc[self.topics.kind == "identity", "topic"].tolist()
 
     @property
     def activity_topics(self) -> list[str]:
-        return self.topics.loc[self.topics.topic_type == "activity", "topic_name"].tolist()
+        return self.topics.loc[self.topics.kind == "activity", "topic"].tolist()
 
     @property
     def allowed(self) -> pd.DataFrame:
         """Cell type x topic permission mask derived from the geometry."""
         return self.geometry.allowed_frame()
-
-    def identity_share(self) -> pd.Series:
-        """Per-cell theta summed over identity topics (all sub-topics of the cell's own type)."""
-        return self.theta[self.identity_topics].sum(axis=1)
 
     def __repr__(self) -> str:
         n_cells, n_topics = self.theta.shape
@@ -85,13 +81,20 @@ class HLDAResult:
         )
 
 
-def topic_geometry(adata, cell_type_key, n_activity_topics=None, *, identity_topics=None, shared_topics=None):
-    """The topic geometry ``fit_hlda`` would use, without fitting.
+def geometry(adata, cell_type_key, n_activity_topics=None, *, identity_topics=None, shared_topics=None, topics=None):
+    """A topic geometry for the cell types in ``adata.obs[cell_type_key]``.
 
-    ``print(g.describe())`` lists each cell type's topics and which types share
-    each activity topic; ``g.allowed_frame()`` is the permission mask.
+    With no other argument: one identity topic per cell type and no shared
+    topic. Edit it with ``g.split(type, n)``, ``g.share(name, types)``,
+    ``g.drop(name)``, ``g.alpha(name, value)``; ``g.describe()`` prints it,
+    ``g.to_frame()`` / ``g.to_csv()`` give the table that ``topics=`` (a
+    DataFrame or CSV path) reads back. Shortcuts: ``n_activity_topics=m``
+    adds ``V1 .. Vm`` for every type; ``identity_topics={type: n or [names]}``
+    and ``shared_topics={name: "all" or [types]}`` as in ``split`` / ``share``.
     """
-    return _geometry.build_geometry(adata.obs, cell_type_key, n_activity_topics, identity_topics, shared_topics)
+    obs = adata if isinstance(adata, pd.DataFrame) else adata.obs
+    return _geometry.build(_geometry.get_labels(obs, cell_type_key), n_activity_topics,
+                           identity_topics, shared_topics, topics)
 
 
 def fit_hlda(
@@ -99,8 +102,7 @@ def fit_hlda(
     cell_type_key,
     n_activity_topics=None,
     *,
-    identity_topics=None,
-    shared_topics=None,
+    geometry=None,
     layer=None,
     output_dir=None,
     init="data_driven",
@@ -109,13 +111,13 @@ def fit_hlda(
     thin=30,
     n_threads=1,
     alpha_beta=0.1,
-    alpha_c=0.1,
-    alpha_c_identity=None,
-    prior_scale_identity=None,
+    alpha_identity=1.0,
+    alpha_activity=0.1,
     seed=None,
     key_added="schlda",
     verbose=True,
     report_every=100,
+    **legacy,
 ):
     """Fit HLDA to raw counts in an AnnData by collapsed Gibbs sampling.
 
@@ -128,22 +130,17 @@ def fit_hlda(
         Column in ``adata.obs`` giving each cell's type. No missing values.
     n_activity_topics
         Number of activity topics ``V1 .. Vm`` (may be 0) shared by every
-        cell. With the default ``identity_topics`` every cell type gets one
-        identity topic, and a cell's tokens may only use its own identity
-        topic or the activity topics.
-    identity_topics
-        Dict ``{cell type: n}`` or ``{cell type: [names]}`` giving a type
-        several identity topics (``n`` > 1 names them ``<type>_1 .. <type>_n``)
-        or none (0). Types not listed get one, named after the type.
-    shared_topics
-        Dict ``{topic name: "all" or [cell types]}``, replacing
-        ``n_activity_topics``: each activity topic and the cell types that may
-        use it, in fit order. One type is allowed (a type-specific program kept
-        separate from that type's identity).
+        cell, on top of one identity topic per cell type. A cell's tokens may
+        only use its own identity topic or the activity topics.
+    geometry
+        Any other geometry, replacing ``n_activity_topics``: a
+        ``TopicGeometry`` from ``schlda.geometry``, or its table (DataFrame or
+        CSV path with columns ``topic, kind, cell_types, alpha``). Its cell
+        types must be those of ``adata.obs[cell_type_key]``.
     layer
         Layer to read counts from, e.g. ``"counts"``. Defaults to ``adata.X``.
     output_dir
-        Where to write ``HLDA_beta.csv``, ``HLDA_theta.csv``, ``topic_info.csv``
+        Where to write ``HLDA_beta.csv``, ``HLDA_theta.csv``, ``topics.csv``
         and the posterior samples under ``samples/``. Defaults to
         ``./schlda_output`` in the working directory, with a warning.
     init
@@ -158,19 +155,10 @@ def fit_hlda(
         of the gene-topic table merged after every sweep (Newman et al. 2009).
     alpha_beta
         Dirichlet concentration on the gene distributions.
-    alpha_c
-        Dirichlet concentration on each activity topic: a float, or
-        one value per cell (array in ``adata`` row order, or a Series aligned
-        on ``adata.obs_names``).
-    alpha_c_identity
-        Concentration on the cell's identity, float or one value per cell,
-        split evenly over its type's identity topics when ``identity_topics``
-        gives it several. Defaults to ``alpha_c``.
-    prior_scale_identity
-        ``kappa``: identity concentration ``kappa * L_i``, with ``L_i`` the
-        cell's UMI count, so the prior carries the same share of every cell's
-        evidence (split evenly over a type's identity topics). Replaces
-        ``alpha_c_identity``.
+    alpha_identity, alpha_activity
+        Dirichlet concentration on a cell's identity (split evenly over its
+        type's identity topics when it has several) and on each activity
+        topic. A topic whose ``alpha`` is set in the geometry keeps that value.
     seed
         Seeds initialisation and the chain. A run repeats exactly for a fixed
         ``seed`` and ``n_threads``.
@@ -201,26 +189,27 @@ def fit_hlda(
         )
     if init not in ("data_driven", "random"):
         raise ValueError(f"init must be 'data_driven' or 'random', got {init!r}.")
-    if prior_scale_identity is not None:
-        if alpha_c_identity is not None:
-            raise ValueError("prior_scale_identity replaces alpha_c_identity; give one of them.")
-        if not (np.isscalar(prior_scale_identity) and np.isfinite(prior_scale_identity)
-                and prior_scale_identity > 0):
-            raise ValueError(f"prior_scale_identity must be a positive number, got {prior_scale_identity!r}.")
+    alpha_identity, alpha_activity = _legacy(legacy, alpha_identity, alpha_activity)
+    alpha_identity, alpha_activity = _geometry._alpha(alpha_identity), _geometry._alpha(alpha_activity)
+    alpha_beta = _geometry._alpha(alpha_beta)
 
     counts = _get_counts(adata, layer)
-    geom = topic_geometry(adata, cell_type_key, n_activity_topics,
-                          identity_topics=identity_topics, shared_topics=shared_topics)
-    labels = geom.labels
+    labels = _geometry.get_labels(adata.obs, cell_type_key)
+    if geometry is None:
+        geom = _geometry.build(labels, n_activity_topics)
+    else:
+        if n_activity_topics is not None:
+            raise ValueError("geometry replaces n_activity_topics; give one of them.")
+        g = geometry if isinstance(geometry, _geometry.TopicGeometry) else \
+            _geometry.TopicGeometry.from_frame(geometry, _geometry.identity_order(labels))
+        geom = g.bind(labels)
     topic_names = list(geom.topic_names)
     topic_types = list(geom.topic_types)
     n_topics = len(topic_names)
     is_id = geom.identity_mask()
     n_identity = int(is_id.sum())
     n_activity = topic_types.count("activity")
-    act_cells = _per_cell(alpha_c, "alpha_c", adata.obs_names)
-    id_cells = None if alpha_c_identity is None else _per_cell(alpha_c_identity, "alpha_c_identity",
-                                                               adata.obs_names)
+    alpha_topic = geom.resolve_alpha(alpha_identity, alpha_activity)
 
     output_dir = _resolve_output_dir(output_dir)
     sample_dir = output_dir / "samples"
@@ -239,7 +228,7 @@ def fit_hlda(
             f"[schlda] {n_cells:,} cells x {n_genes:,} genes, "
             f"{n_topics} topics ({n_identity} identity + {n_activity} activity), {n_threads} thread(s)"
         )
-        if geom.kind == "custom":
+        if geometry is not None:
             print(geom.describe())
         print(f"[schlda] output -> {output_dir}")
 
@@ -251,19 +240,8 @@ def fit_hlda(
     z = _init.initial_assignments(counts, identity_ints, cell_idx, ident_rep, geom, init, rng, verbose=verbose)
     A, B, D = _gibbs.compute_count_tables(cell_idx, gene_idx, z, n_cells, n_genes, n_topics)
     cell_offsets = _gibbs_blocked.cell_offsets_from_idx(cell_idx, n_cells)
-    tokens_per_cell = np.diff(cell_offsets)
 
-    if prior_scale_identity is not None:
-        id_cells = float(prior_scale_identity) * tokens_per_cell.astype(np.float64)
-        prior = "identity_depth_scaled"
-    else:
-        id_cells = act_cells if id_cells is None else id_cells
-        scalar = np.isscalar(alpha_c) and (alpha_c_identity is None or np.isscalar(alpha_c_identity))
-        prior = "fixed" if scalar else "per_cell"
-    alpha = np.empty((n_cells, n_topics), dtype=np.float64)
-    alpha[:, ~is_id] = act_cells[:, None]
-    n_own = np.maximum(geom.allowed[:, is_id].sum(1), 1)[identity_ints].astype(np.float64)
-    alpha[:, is_id] = (id_cells / n_own)[:, None]
+    alpha = np.ascontiguousarray(np.broadcast_to(alpha_topic, (n_cells, n_topics)))
 
     valid_topics, valid_offsets = geom.csr()
     block_bounds = _gibbs_blocked.make_blocks(cell_offsets, n_threads)
@@ -275,12 +253,7 @@ def fit_hlda(
 
     if verbose:
         print(f"[schlda] {cell_idx.shape[0]:,} tokens, {n_blocks} block(s)")
-        if prior == "identity_depth_scaled":
-            print(f"[schlda] prior: alpha_identity = {prior_scale_identity} * L_i "
-                  f"(median L_i {np.median(tokens_per_cell):.0f})")
-        elif prior == "per_cell":
-            print(f"[schlda] prior: per-cell alpha (identity median {np.median(id_cells):.3g}, "
-                  f"activity median {np.median(act_cells):.3g})")
+        print(f"[schlda] prior: alpha_identity={alpha_identity:g} alpha_activity={alpha_activity:g}")
         print(f"[schlda] Gibbs: n_loops={n_loops} burn_in={burn_in} thin={thin} ({n_save} draws kept)")
 
     A_chain, D_chain = _gibbs.open_chains(sample_dir, n_save, n_genes, n_cells, n_topics)
@@ -307,14 +280,11 @@ def fit_hlda(
     beta, theta = _gibbs.posterior_means(
         A_chain, D_chain, n_save, adata.var_names, adata.obs_names, topic_names
     )
-    topics = geom.topics_frame()
-
-    def _record(x):
-        return float(x) if x is not None and np.isscalar(x) else ("per_cell" if x is not None else None)
+    topics = geom.to_frame(alpha_identity, alpha_activity)
 
     params = {
         "cell_type_key": str(cell_type_key),
-        "geometry": geom.record(),
+        "geometry": topics.to_dict(orient="list"),
         "layer": "X" if layer is None else str(layer),
         "n_activity_topics": int(n_activity),
         "init": init,
@@ -323,11 +293,8 @@ def fit_hlda(
         "thin": int(thin),
         "n_save": int(n_save),
         "alpha_beta": float(alpha_beta),
-        "prior": prior,
-        "alpha_c": _record(alpha_c),
-        "alpha_c_identity": (None if prior_scale_identity is not None else
-                             _record(alpha_c if alpha_c_identity is None else alpha_c_identity)),
-        "prior_scale_identity": None if prior_scale_identity is None else float(prior_scale_identity),
+        "alpha_identity": alpha_identity,
+        "alpha_activity": alpha_activity,
         "n_threads": int(n_threads),
         "n_blocks": int(n_blocks),
         "n_tokens": int(cell_idx.shape[0]),
@@ -337,11 +304,7 @@ def fit_hlda(
 
     beta.to_csv(output_dir / "HLDA_beta.csv")
     theta.to_csv(output_dir / "HLDA_theta.csv")
-    topics.to_csv(output_dir / "topic_info.csv", index=False)
-    geom.allowed_frame().astype(int).to_csv(output_dir / "allowed_topics.csv")
-    if prior != "fixed":
-        pd.DataFrame({"identity": id_cells, "activity": act_cells},
-                     index=adata.obs_names).to_csv(output_dir / "theta_prior.csv")
+    topics.to_csv(output_dir / "topics.csv", index=False)
     _gibbs.write_sample_metadata(sample_dir, n_save, n_genes, n_cells, n_topics, topic_names, params)
 
     adata.obsm[f"{key_added}_theta"] = theta.to_numpy()
@@ -367,24 +330,21 @@ def fit_hlda(
     )
 
 
-def _per_cell(value, name, obs_names):
-    """A positive float, or one value per cell (array in row order / Series aligned on obs_names)."""
-    n = len(obs_names)
-    if np.isscalar(value):
-        out = np.full(n, float(value), dtype=np.float64)
-    elif isinstance(value, pd.Series):
-        aligned = value.reindex(obs_names)
-        if aligned.isna().any():
-            missing = int(aligned.isna().sum())
-            raise ValueError(f"{name}: {missing} cell(s) missing from the Series index or NaN.")
-        out = aligned.to_numpy(dtype=np.float64)
-    else:
-        out = np.asarray(value, dtype=np.float64).ravel()
-        if out.shape[0] != n:
-            raise ValueError(f"{name} must be a number or have one value per cell ({n}), got {out.shape[0]}.")
-    if not (np.all(np.isfinite(out)) and np.all(out > 0)):
-        raise ValueError(f"{name} must be positive and finite.")
-    return out
+def _legacy(kw, alpha_identity, alpha_activity):
+    """Map the 0.4/0.5 prior arguments; per-cell and depth-scaled priors are gone."""
+    for k in ("alpha_c_identity", "prior_scale_identity"):
+        if k in kw and (k == "prior_scale_identity" or not np.isscalar(kw[k])):
+            raise TypeError(f"{k} was removed in 0.6.0: the prior is a fixed alpha_identity / alpha_activity "
+                            f"(per topic via geometry.alpha).")
+    if "alpha_c" in kw:
+        warnings.warn("alpha_c is now alpha_activity", DeprecationWarning, stacklevel=3)
+        alpha_activity = kw.pop("alpha_c")
+    if "alpha_c_identity" in kw:
+        warnings.warn("alpha_c_identity is now alpha_identity", DeprecationWarning, stacklevel=3)
+        alpha_identity = kw.pop("alpha_c_identity")
+    if kw:
+        raise TypeError(f"fit_hlda() got unexpected keyword argument(s) {sorted(kw)}")
+    return alpha_identity, alpha_activity
 
 
 def _check_int(value, name, minimum=None):
