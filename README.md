@@ -229,6 +229,54 @@ it cannot be split between that shared topic and their identity topics (the
 likelihood is flat along the split). Shared topics are identified by
 cell-to-cell variation in their use.
 
+### Hierarchies
+
+Sharing is per cell type, so a lineage tree is a set of nested shared topics:
+a cell may use its own identity topic(s) plus every shared topic whose list
+contains its type.
+
+```python
+g = schlda.geometry(adata, "cell_type")
+g.share("V1")                                      # root: every cell
+g.share("lymphoid", ["B", "CD4T", "CD8T", "NK"])    # one branch
+g.share("T", ["CD4T", "CD8T"])                     # a sub-branch
+g.share("myeloid", ["CD14Mono", "FCGR3AMono", "DC"])
+g.split("CD4T", 2)                                 # leaves can still be split
+print(g.describe())
+# CD4T  (5,091 cells): CD4T_1, CD4T_2, V1, lymphoid, T
+```
+
+Groups may overlap (a type can sit in several), so any DAG over cell types is
+expressible. Two things are not: a topic shared between sub-topics rather than
+types (`AC_1` and `MES1_1` only), and inheritance — each level is written out.
+
+### Choosing a geometry
+
+There is no rule for the number of identity topics per type; the diagnostic
+that has worked is to fit the default geometry and look at what the activity
+topics became. For each activity topic `V`, compute its mean usage per cell
+type and its similarity to each identity profile:
+
+```python
+res = schlda.fit_hlda(adata, "cell_type", 2, layer="counts", output_dir="results/default", seed=0)
+B, th = res.beta, res.theta
+use = th.groupby(adata.obs["cell_type"].values)[res.activity_topics].mean()      # types x activity topics
+cos2 = (B[res.identity_topics].T @ B[res.activity_topics]) ** 2 / \
+       np.outer((B[res.identity_topics] ** 2).sum(), (B[res.activity_topics] ** 2).sum())
+```
+
+| what you see | what it means | geometry change |
+| --- | --- | --- |
+| `V` is used by one or two types and looks like one of their identity profiles (high `cos2`) | `V` is a substate of that type, not a cross-type program | `g.split(type, 2)` and refit; `V` is freed for the program |
+| `V` is used by one lineage only (several related types) | a lineage program | `g.share(name, [those types])` so it cannot leak into the others |
+| cells of a type have identity share near 0 and load on such a `V` | same as the first row, seen from the cells | same |
+| `V` is used by many types and resembles none of them | a cross-type program — what activity topics are for | keep |
+
+After a split, check that the new identity topics did not take the program
+(`cos2` of `type_1`, `type_2` with the program's genes should stay low); if one
+did, the program is specific to that type and belongs to it as an identity
+topic, or needs `share(name, [type])` to be kept apart from the identity.
+
 ## Plot
 
 ```python
