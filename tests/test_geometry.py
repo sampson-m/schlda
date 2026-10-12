@@ -234,7 +234,7 @@ def test_identity_subtopics(tmp_path):
 def test_custom_reproducible_threads_and_topic_alpha(tmp_path):
     a, _ = simulate_lineage()
     kw = dict(geometry=lineage(a).alpha("AB", 0.5), n_threads=2,
-              **{**FIT, "n_loops": 60, "burn_in": 30, "thin": 5, "init": "data_driven"})
+              **{**FIT, "n_loops": 60, "burn_in": 30, "thin": 5})
     r1 = schlda.fit_hlda(a, "cell_type", output_dir=tmp_path / "1", **kw)
     r2 = schlda.fit_hlda(a, "cell_type", output_dir=tmp_path / "2", **kw)
     assert np.array_equal(r1.theta.to_numpy(), r2.theta.to_numpy())

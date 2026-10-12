@@ -105,7 +105,7 @@ def fit_hlda(
     geometry=None,
     layer=None,
     output_dir=None,
-    init="data_driven",
+    init="random",
     n_loops=3000,
     burn_in=1000,
     thin=30,
@@ -144,8 +144,8 @@ def fit_hlda(
         and the posterior samples under ``samples/``. Defaults to
         ``./schlda_output`` in the working directory, with a warning.
     init
-        ``"data_driven"`` seeds the chain from per-identity mean expression;
-        ``"random"`` assigns each token uniformly over its permitted topics.
+        ``"random"`` (the only scheme): each token starts on a topic drawn
+        uniformly from those its cell may use.
     n_loops, burn_in, thin
         Gibbs sweeps in total, sweeps discarded, and the interval between kept
         draws. ``(n_loops - burn_in) // thin`` draws are saved.
@@ -187,8 +187,10 @@ def fit_hlda(
             f"thin ({thin}) is larger than the post-burn-in run "
             f"({n_loops - burn_in} sweeps), so no draws would be kept."
         )
-    if init not in ("data_driven", "random"):
-        raise ValueError(f"init must be 'data_driven' or 'random', got {init!r}.")
+    if init == "data_driven":
+        raise ValueError("init='data_driven' was removed in 0.7.0; the chain starts from init='random'.")
+    if init != "random":
+        raise ValueError(f"init must be 'random', got {init!r}.")
     alpha_identity, alpha_activity = _legacy(legacy, alpha_identity, alpha_activity)
     alpha_identity, alpha_activity = _geometry._alpha(alpha_identity), _geometry._alpha(alpha_activity)
     alpha_beta = _geometry._alpha(alpha_beta)
@@ -237,7 +239,7 @@ def fit_hlda(
     rng = np.random.default_rng(chain_seed)
 
     cell_idx, gene_idx, ident_rep = _gibbs.expand_tokens(counts, identity_ints)
-    z = _init.initial_assignments(counts, identity_ints, cell_idx, ident_rep, geom, init, rng, verbose=verbose)
+    z = _init.initial_assignments(ident_rep, geom, rng, verbose=verbose)
     A, B, D = _gibbs.compute_count_tables(cell_idx, gene_idx, z, n_cells, n_genes, n_topics)
     cell_offsets = _gibbs_blocked.cell_offsets_from_idx(cell_idx, n_cells)
 

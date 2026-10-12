@@ -8,8 +8,8 @@ Gibbs sampler; several blocks give the approximate distributed scheme of
 Newman et al. (2009). Every block reseeds its thread's generator from
 ``seeds[p]``, so a run is reproducible for a fixed ``seed`` and block count.
 
-``alpha_c`` is cells x topics: the concentration may differ per cell (per-cell
-or depth-scaled priors of ``fit_hlda``).
+``alpha_c`` is cells x topics: each cell's row is the ``alpha`` of the topics
+its type may use (from the geometry) and zero elsewhere.
 """
 
 from __future__ import annotations

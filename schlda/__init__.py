@@ -21,4 +21,4 @@ from .model import HLDAResult, fit_hlda, geometry
 from .plotting import cell_order, structure_plot, theta_heatmap
 
 __all__ = ["fit_hlda", "geometry", "TopicGeometry", "HLDAResult", "structure_plot", "theta_heatmap", "cell_order"]
-__version__ = "0.6.0"
+__version__ = "0.7.0"

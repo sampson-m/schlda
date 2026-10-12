@@ -83,14 +83,11 @@ A = np.memmap("results/pbmc/samples/A_chain.memmap", dtype="int32",
 
 ### Initialisation
 
-`init="data_driven"` (default) builds a provisional topic per identity from that
-type's mean expression, then splits each cell's tokens between its identity
-topic and the activity topics according to how well the cell correlates with its
-own type. Cells that fit their annotation start out nearly pure; cells that fit
-it poorly start with more weight on activity topics.
-
-`init="random"` assigns each token uniformly over the topics its cell is allowed
-to use.
+Every token starts on a topic drawn uniformly from those its cell may use
+(`init="random"`, the only scheme). The chain, not the starting point, decides
+the fit; `burn_in` is what absorbs the start. Compare two or three `seed`s on
+a new dataset or geometry — a split that is found by some seeds and not others
+is a sign the data admit more than one solution.
 
 ### Sampler settings
 
@@ -277,6 +274,46 @@ After a split, check that the new identity topics did not take the program
 did, the program is specific to that type and belongs to it as an identity
 topic, or needs `share(name, [type])` to be kept apart from the identity.
 
+### Cells with low identity usage
+
+Some cells of a type can end up with identity share near zero: their counts
+are explained by an activity topic alone. This is expected behaviour, not a
+sampler failure, and it is decided by the likelihood. When a cell type hides
+two expression states under one label, the identity topic can hold only one
+profile; a shared topic is free to take the other, and every cell in that
+state then fits the shared topic better than its own identity.
+
+The theta prior cannot undo this at normal depth. With `alpha_identity` as
+pseudo-counts against the `L_i` tokens the cell actually has, the posterior
+share of an identity topic is roughly
+
+```
+E[theta_id | data] ≈ (alpha_identity + n_id) / (sum(alpha) + L_i)
+```
+
+where `n_id` is the number of tokens the likelihood puts on identity; with
+`L_i` in the hundreds and `n_id ≈ 0`, no reasonable `alpha_identity` moves it
+off zero (`alpha_identity = 1` only keeps the prior from *pushing* cells to
+zero). Scaling `alpha` with `L_i` would move it, but is no longer a prior on
+the generative model and was removed in 0.6.0.
+
+The remedy is the geometry: give the type a second identity topic so both
+states are identity, and the shared topic is freed for the cross-type program.
+To check for it:
+
+```python
+own = sum(res.theta[t] * (adata.obs["cell_type"] == c).values
+          for t, c in zip(res.topics.topic, res.topics.cell_types) if t in res.identity_topics)
+(own < 0.01).groupby(adata.obs["cell_type"].values).mean()      # fraction of cells per type
+```
+
+A type with a non-trivial fraction here, whose activity topic resembles one
+of its profiles ([Choosing a geometry](#choosing-a-geometry)), is a candidate
+for `g.split(type, 2)`. Section 3d of `examples/vignette.py` simulates
+a type with a hidden substate, shows the default geometry losing about half of
+that type's cells to an activity topic, and the split recovering them with the
+cross-type program intact.
+
 ## Plot
 
 ```python
@@ -367,8 +404,9 @@ Other knobs: `topic_order`, `group_order`, `colors`, `max_cells_per_group`,
 
 `examples/vignette.py` simulates four cell types plus one planted activity
 program, fits the model in under a minute, checks that the program was
-recovered, and draws the fit next to the simulation truth on a shared cell
-order:
+recovered, draws the fit next to the simulation truth on a shared cell order,
+and (section 3d) shows a hidden substate costing a type its identity and a
+split geometry restoring it:
 
 ```bash
 python examples/vignette.py vignette_out

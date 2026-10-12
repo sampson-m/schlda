@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.7.0 — 2026-10-12
+
+- Removed the data-driven initialiser (`init="data_driven"`): it seeded the
+  shared topics with the tokens of a type's poorly-fitting cells and started a
+  type's identity sub-topics identical, so it worked against `split`
+  geometries. Every chain now starts from `init="random"` (the only accepted
+  value; `"data_driven"` raises). This is how every fit in the paper was run.
 ## 0.6.0 — 2026-10-09
 
 - One geometry object. `schlda.geometry(adata, "cell_type")` returns the
@@ -22,6 +29,11 @@
   work with a `DeprecationWarning`.
 - Kinds are `identity` and `activity` only; an activity topic restricted to one
   cell type is activity and takes `alpha_activity`.
+- README: "Cells with low identity usage" — why identity theta reaches zero,
+  why the prior cannot fix it, and the split geometry that does; vignette
+  section 3d demonstrates it on a simulated hidden substate. `init="random"`
+  is recommended for split geometries (the data-driven initialiser seeds the
+  shared topics with the substate).
 
 ## 0.5.0 — 2026-10-06
 

@@ -93,7 +93,6 @@ res = schlda.fit_hlda(
     n_activity_topics=1,
     layer="counts",
     output_dir=OUT,
-    init="data_driven",   # or "random"
     n_loops=600,
     burn_in=300,
     thin=10,
@@ -106,7 +105,8 @@ print(f"activity topics: {res.activity_topics}\n")
 
 # ── 3b. The same fit on two threads ───────────────────────────────────────
 # n_threads splits the cells into blocks swept concurrently (1 = the exact
-# serial sampler). alpha_identity / alpha_activity set the theta prior.
+# serial sampler). alpha_identity / alpha_activity set the fixed theta prior
+# (defaults 1.0 / 0.1); the concentrations are the same for every cell.
 
 res_par = schlda.fit_hlda(
     adata,
@@ -139,6 +139,67 @@ print(f"cos(stress topic, true stress program) = "
 print(f"Monocyte cells never use 'lymphoid': "
       f"{(res_geo.theta.loc[adata.obs.cell_type == 'Monocyte', 'lymphoid'] == 0).all()}\n")
 
+def cosine(a, b):
+    return float(a @ b / (np.linalg.norm(a) * np.linalg.norm(b)))
+
+# ── 3d. When a type's cells abandon their identity topic ──────────────────
+# A cell type that hides a substate (two expression states under one label)
+# is the usual reason a cell ends up with identity theta near 0: a shared
+# topic takes the substate's profile, and that substate's cells are then
+# explained entirely by the shared topic. The theta prior cannot prevent it
+# at realistic depth; the remedy is geometry — give the type a second identity
+# topic. Simulated below: type A has a 40 % substate, and all three types
+# carry a cross-type program.
+
+def simulate_substate(rng, n_genes=300):
+    def program(block):
+        p = rng.gamma(0.3, 1.0, n_genes) + 1e-3
+        p[block] *= 60
+        return p / p.sum()
+    prog = {k: program(slice(50 * i, 50 * (i + 1))) for i, k in enumerate(["A", "A_sub", "B", "C", "shared"])}
+    X, lab = [], []
+    for name, n in [("A", 300), ("B", 150), ("C", 150)]:
+        for _ in range(n):
+            base = prog["A_sub"] if name == "A" and rng.random() < 0.4 else prog[name]
+            w = rng.beta(2, 4) if rng.random() < 0.3 else 0.0
+            X.append(rng.multinomial(rng.integers(700, 1400), (1 - w) * base + w * prog["shared"]))
+            lab.append(name)
+    a = ad.AnnData(sp.csr_matrix(np.array(X, dtype=np.float32)))
+    a.obs_names = [f"s{i}" for i in range(a.n_obs)]
+    a.var_names = [f"g{i}" for i in range(n_genes)]
+    a.obs["cell_type"] = pd.Categorical(lab, categories=["A", "B", "C"])
+    return a, prog
+
+def identity_share(res, labels):
+    """Each cell's total theta on its own type's identity topic(s)."""
+    own = pd.Series(0.0, index=res.theta.index)
+    for _, row in res.topics[res.topics.kind == "identity"].iterrows():
+        m = labels == row.cell_types
+        own[m] += res.theta.loc[m, row.topic]
+    return own
+
+sub, sub_prog = simulate_substate(np.random.default_rng(1))
+labels_sub = sub.obs["cell_type"].to_numpy()
+sub_kw = dict(n_loops=400, burn_in=200, thin=10, seed=0, verbose=False)
+
+res_def = schlda.fit_hlda(sub, "cell_type", 2, output_dir=OUT / "substate_default", **sub_kw)
+g_split = schlda.geometry(sub, "cell_type").split("A", 2).share("V1")
+res_split = schlda.fit_hlda(sub, "cell_type", geometry=g_split, output_dir=OUT / "substate_split", **sub_kw)
+
+print("\nfraction of cells with identity theta < 0.01, by type")
+tab = pd.DataFrame({
+    "default (A, B, C, V1, V2)": (identity_share(res_def, labels_sub) < 0.01).groupby(labels_sub).mean(),
+    "split A  (A_1, A_2, B, C, V1)": (identity_share(res_split, labels_sub) < 0.01).groupby(labels_sub).mean(),
+})
+print(tab.round(2).to_string())
+for name, r in [("default", res_def), ("split", res_split)]:
+    for v in r.activity_topics:
+        b = r.beta[v].to_numpy()
+        print(f"{name:>7} {v}: cos with shared program {cosine(b, sub_prog['shared']):.2f}, "
+              f"A main state {cosine(b, sub_prog['A']):.2f}, A substate {cosine(b, sub_prog['A_sub']):.2f}")
+print("(default: one activity topic is one of A's two states, and the A cells in that state have no\n"
+      " identity; after the split both states are A identity topics and V1 is the cross-type program)")
+
 # ── 4. Inspect ─────────────────────────────────────────────────────────────
 # beta is genes x topics: the top genes of a topic say what it represents.
 
@@ -155,9 +216,6 @@ print(usage.round(3).to_string())
 # ── 5. Did it recover the planted program? ─────────────────────────────────
 # The activity topic should match the stress program in gene space, and its
 # per-cell weight should track the strength each cell was simulated with.
-
-def cosine(a, b):
-    return float(a @ b / (np.linalg.norm(a) * np.linalg.norm(b)))
 
 v1 = res.beta["V1"].to_numpy()
 print(f"\ncos(V1 genes, true stress program) = {cosine(v1, programs['stress']):.3f}")
@@ -199,7 +257,7 @@ for i, (name, w) in enumerate(zip(labels, true_stress)):
 order = schlda.cell_order(res)
 fig, axes = plt.subplots(3, 1, figsize=(9, 9), sharex=True)
 schlda.structure_plot(res, order=order, ax=axes[0], title="HLDA fit", legend=False)
-schlda.structure_plot(res_par, order=order, ax=axes[1], title="parallel fit, depth-scaled prior", legend=False)
+schlda.structure_plot(res_par, order=order, ax=axes[1], title="two-thread fit", legend=False)
 schlda.structure_plot(
     truth, cell_types=adata.obs["cell_type"], activity_topics=["stress"],
     order=order, ax=axes[2], title="simulation truth",
