@@ -1,8 +1,9 @@
 """End-to-end HLDA vignette on simulated data.
 
 Runs in well under a minute and needs no input files: it simulates four cell
-types plus one shared activity program, fits HLDA, and checks that the fit
-recovered the program that was planted.
+types plus one shared activity program, fits HLDA, checks that the fit
+recovered the program that was planted, and shows how to read a fit when
+deciding on a topic geometry.
 
     python examples/vignette.py [output_dir]
 
@@ -81,11 +82,14 @@ except ValueError as err:
     print(f"as expected, the normalised .X is rejected:\n  {err}\n")
 
 # ── 3. Fit ─────────────────────────────────────────────────────────────────
-# One identity topic per cell type is created automatically from the
-# annotation. n_activity_topics is the only structural choice you make.
+# One topic per cell type is created automatically from the annotation.
+# n_activity_topics is the only structural choice you make.
 #
 # n_loops/burn_in are kept short here so the vignette finishes quickly. For
 # real data the defaults (3000/1000/30) are a more sensible starting point.
+# Every chain starts from a uniform random assignment, so on a new dataset or
+# geometry compare two or three seeds: a split found by some seeds and not
+# others means the data admit more than one solution.
 
 res = schlda.fit_hlda(
     adata,
@@ -124,12 +128,13 @@ res_par = schlda.fit_hlda(
 print(f"\ntwo-thread fit: {res_par}  ({res_par.params['seconds_per_sweep']:.3f} s/sweep)")
 
 # ── 3c. A custom topic geometry ───────────────────────────────────────────
-# schlda.geometry gives one identity topic per type; split() adds identity
-# sub-topics, share() adds an activity topic for every type or a list of
-# types. Preview with describe(), then pass it as geometry=.
+# schlda.geometry gives every cell type one topic. topics(node, n) sets how
+# many topics a node carries; group(name, members) adds a group of cell types
+# whose topics every member may use ("all" or a list). Preview with
+# describe(), then pass it as geometry=.
 
-geo = schlda.geometry(adata, "cell_type").split("T_cell", 2).share("stress") \
-    .share("lymphoid", ["T_cell", "B_cell", "NK_cell"])
+geo = schlda.geometry(adata, "cell_type").topics("T_cell", 2).group("stress") \
+    .group("lymphoid", ["T_cell", "B_cell", "NK_cell"])
 print(geo.describe())
 res_geo = schlda.fit_hlda(adata, "cell_type", geometry=geo, layer="counts", output_dir=OUT / "geometry",
                           n_loops=600, burn_in=300, thin=10, seed=0, verbose=False)
@@ -142,14 +147,17 @@ print(f"Monocyte cells never use 'lymphoid': "
 def cosine(a, b):
     return float(a @ b / (np.linalg.norm(a) * np.linalg.norm(b)))
 
-# ── 3d. When a type's cells abandon their identity topic ──────────────────
+# ── 3d. When a type's cells abandon their own topic ───────────────────────
 # A cell type that hides a substate (two expression states under one label)
-# is the usual reason a cell ends up with identity theta near 0: a shared
-# topic takes the substate's profile, and that substate's cells are then
-# explained entirely by the shared topic. The theta prior cannot prevent it
-# at realistic depth; the remedy is geometry — give the type a second identity
-# topic. Simulated below: type A has a 40 % substate, and all three types
-# carry a cross-type program.
+# is the usual reason a cell ends up with theta near 0 on its own topic: a
+# shared topic takes the substate's profile, and that substate's cells are
+# then explained entirely by the shared topic. The theta prior cannot prevent
+# it at realistic depth: with alpha pseudo-counts against the L_i tokens a
+# cell actually has, E[theta_own | data] ~ (alpha + n_own) / (sum(alpha) + L_i),
+# and with L_i in the hundreds and n_own ~ 0 no reasonable alpha moves it off
+# zero. The remedy is geometry — give the type a second topic. Simulated
+# below: type A has a 40 % substate, and all three types carry a cross-type
+# program.
 
 def simulate_substate(rng, n_genes=300):
     def program(block):
@@ -171,10 +179,10 @@ def simulate_substate(rng, n_genes=300):
     return a, prog
 
 def identity_share(res, labels):
-    """Each cell's total theta on its own type's identity topic(s)."""
+    """Each cell's total theta on its own type's topic(s)."""
     own = pd.Series(0.0, index=res.theta.index)
-    for _, row in res.topics[res.topics.kind == "identity"].iterrows():
-        m = labels == row.cell_types
+    for _, row in res.topics[res.topics.topic.isin(res.identity_topics)].iterrows():
+        m = labels == row.node
         own[m] += res.theta.loc[m, row.topic]
     return own
 
@@ -183,7 +191,7 @@ labels_sub = sub.obs["cell_type"].to_numpy()
 sub_kw = dict(n_loops=400, burn_in=200, thin=10, seed=0, verbose=False)
 
 res_def = schlda.fit_hlda(sub, "cell_type", 2, output_dir=OUT / "substate_default", **sub_kw)
-g_split = schlda.geometry(sub, "cell_type").split("A", 2).share("V1")
+g_split = schlda.geometry(sub, "cell_type").topics("A", 2).group("V1")
 res_split = schlda.fit_hlda(sub, "cell_type", geometry=g_split, output_dir=OUT / "substate_split", **sub_kw)
 
 print("\nfraction of cells with identity theta < 0.01, by type")
@@ -198,7 +206,40 @@ for name, r in [("default", res_def), ("split", res_split)]:
         print(f"{name:>7} {v}: cos with shared program {cosine(b, sub_prog['shared']):.2f}, "
               f"A main state {cosine(b, sub_prog['A']):.2f}, A substate {cosine(b, sub_prog['A_sub']):.2f}")
 print("(default: one activity topic is one of A's two states, and the A cells in that state have no\n"
-      " identity; after the split both states are A identity topics and V1 is the cross-type program)")
+      " identity; after the split both states are A topics and V1 is the cross-type program)")
+
+# ── 3e. Reading a default fit to decide on a geometry ─────────────────────
+# There is no rule for the number of topics a type needs. What has worked is
+# to fit the default geometry and look at what the shared topics became: for
+# each shared topic V, its mean usage per cell type and its cos^2 similarity
+# to each type's profile.
+#
+#   V used by one or two types and close to one of their profiles
+#       -> a substate of that type:          g.topics(type, 2)
+#   V used by one lineage only (several related types)
+#       -> a lineage program:                g.group(name, [those types])
+#   cells of a type with own-topic share near 0, loading on such a V
+#       -> the first case, seen from the cells
+#   V used by many types and resembling none of them
+#       -> a cross-type program: what shared topics are for; keep it
+#
+# After adding a topic, check that the new topics of the type did not absorb
+# the program (their cos^2 with its genes should stay low).
+
+B = res_def.beta
+use = res_def.theta.groupby(labels_sub)[res_def.activity_topics].mean()
+cos2 = pd.DataFrame(
+    (B[res_def.identity_topics].T @ B[res_def.activity_topics]) ** 2
+    / np.outer((B[res_def.identity_topics] ** 2).sum(), (B[res_def.activity_topics] ** 2).sum()),
+    index=res_def.identity_topics, columns=res_def.activity_topics)
+low = (identity_share(res_def, labels_sub) < 0.01).groupby(labels_sub).mean()
+print("\ndefault fit on the substate data: mean shared-topic usage by type")
+print(use.round(2).to_string())
+print("cos^2 between each type's topic and each shared topic")
+print(cos2.round(2).to_string())
+print("fraction of cells with own-topic share < 0.01: " + ", ".join(f"{k} {v:.2f}" for k, v in low.items()))
+print("(V1 is used by A alone and 60 % of A cells sit at zero on their own topic -> g.topics('A', 2);\n"
+      " cos^2 is 0 here because the two A states share no genes — it is the signal when they overlap)")
 
 # ── 4. Inspect ─────────────────────────────────────────────────────────────
 # beta is genes x topics: the top genes of a topic say what it represents.

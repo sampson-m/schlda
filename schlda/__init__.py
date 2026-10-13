@@ -1,7 +1,7 @@
 """scHLDA — hierarchical topic models for annotated single-cell count data.
 
-One identity topic per annotated cell type, plus a set of shared activity
-topics every cell may use.
+Every annotated cell type carries its own topic(s); groups of cell types carry
+topics shared by their members (``geometry``).
 
     import scanpy as sc
     import schlda
@@ -21,4 +21,4 @@ from .model import HLDAResult, fit_hlda, geometry
 from .plotting import cell_order, structure_plot, theta_heatmap
 
 __all__ = ["fit_hlda", "geometry", "TopicGeometry", "HLDAResult", "structure_plot", "theta_heatmap", "cell_order"]
-__version__ = "0.7.0"
+__version__ = "0.8.0"

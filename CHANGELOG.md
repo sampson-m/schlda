@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.8.0 — 2026-10-13
+
+- Geometry is built from nodes, not labelled topics. A node is a cell type or
+  a group of cell types; `g.topics(node, n)` sets how many topics a node
+  carries and `g.group(name, members, n=1)` adds a group (`"all"` or a list
+  of two or more types). `split` / `share` are gone: `g.split(t, n)` is
+  `g.topics(t, n)`, `g.share(name, types)` is `g.group(name, types)`. A group
+  of one cell type is rejected — give the type another topic instead.
+- The `kind` column is gone. The table is `topic, node, cell_types, alpha`;
+  "identity" and "activity" survive only as views (`res.identity_topics` =
+  topics of cell types, `res.activity_topics` = topics of groups) used by the
+  plots. Tables written by earlier versions still read.
+- `schlda.geometry` shortcuts are `topics={node: n or [names]}` and
+  `groups={name: members or (members, n or [names])}`; the table argument is
+  `table=` (was `topics=`). `n_activity_topics=m` is a group `V` carrying
+  `V1 .. Vm`.
+- Removed the deprecated `alpha_c` / `alpha_c_identity` arguments.
+- README rewritten as a description of the package; the diagnostics for
+  choosing a geometry moved to `examples/vignette.py` section 3e.
+
 ## 0.7.0 — 2026-10-12
 
 - Removed the data-driven initialiser (`init="data_driven"`): it seeded the

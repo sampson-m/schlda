@@ -54,7 +54,7 @@ def test_fit_recovers_program(tmp_path, n_threads):
         assert (res.theta.loc[a.obs["cell_type"] == t, other].to_numpy() == 0).all()
     assert res.params["alpha_identity"] == 1.0 and res.params["n_threads"] >= 1
     assert (tmp_path / f"t{n_threads}" / "HLDA_beta.csv").exists()
-    assert res.topics.columns.tolist() == ["topic", "kind", "cell_types", "alpha"]
+    assert res.topics.columns.tolist() == ["topic", "node", "cell_types", "alpha"]
     assert a.obsm["schlda_theta"].shape == (a.n_obs, 4)
 
 
@@ -76,13 +76,9 @@ def test_alpha_identity_moves_identity_share(tmp_path):
     assert pd.read_csv(tmp_path / "hi" / "topics.csv").alpha.tolist() == [50, 50, 50, 0.1]
 
 
-def test_legacy_prior_arguments(tmp_path):
+def test_removed_arguments(tmp_path):
     a, _, _ = simulate()
-    with pytest.warns(DeprecationWarning):
-        old = schlda.fit_hlda(a, "cell_type", 1, output_dir=tmp_path / "o", alpha_c=0.3, alpha_c_identity=2.0, **SHORT)
-    new = schlda.fit_hlda(a, "cell_type", 1, output_dir=tmp_path / "n", alpha_activity=0.3, alpha_identity=2.0, **SHORT)
-    assert np.array_equal(old.theta.to_numpy(), new.theta.to_numpy())
-    for kw in (dict(prior_scale_identity=0.1), dict(alpha_c_identity=np.ones(a.n_obs)), dict(bogus=1)):
+    for kw in (dict(prior_scale_identity=0.1), dict(alpha_c=0.3), dict(alpha_c_identity=2.0), dict(bogus=1)):
         with pytest.raises(TypeError):
             schlda.fit_hlda(a, "cell_type", 1, output_dir=tmp_path / "x", **SHORT, **kw)
 

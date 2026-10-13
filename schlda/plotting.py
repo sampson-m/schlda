@@ -271,6 +271,10 @@ def cell_order(
     With no activity topics, ``"auto"`` sorts by the group's own identity
     topic when a topic of that name exists, else keeps the input order.
 
+    Two activity topics, ``min_activity = 0.05``: c1 (V1 0.10, V2 0.30) is in
+    the V2 block, c2 (0.02, 0.01) is quiet, c3 (0.25, 0.05) is in the V1
+    block, so ``"dominant"`` gives c3, c1, c2.
+
     Returns
     -------
     numpy.ndarray of int row positions, usable as ``order=`` in the plots.
@@ -290,7 +294,7 @@ def _resolve(theta, cell_types, key, activity_topics):
     groups = None
 
     if hasattr(theta, "theta") and hasattr(theta, "topics"):  # HLDAResult
-        activity = theta.topics.loc[theta.topics.kind != "identity", "topic"].tolist()
+        activity = list(theta.activity_topics)
         groups = theta.cell_types
         theta_df = theta.theta
     elif hasattr(theta, "obsm"):  # AnnData

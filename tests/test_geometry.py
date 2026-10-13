@@ -17,13 +17,16 @@ FIT = dict(n_loops=300, burn_in=150, thin=10, seed=2, init="random", verbose=Fal
 def equivalent_calls(a, m):
     """Ways of asking for the v0.4.0 geometry; every one must reproduce it exactly."""
     g = schlda.geometry(a, "cell_type")
-    for i in range(m):
-        g.share(f"V{i + 1}")
+    if m:
+        g.group("V", "all", [f"V{i + 1}" for i in range(m)])
     yield "positional", dict(n_activity_topics=m)
     yield "builder", dict(geometry=g)
     yield "frame", dict(geometry=g.to_frame())
-    yield "shared_listed", dict(geometry=schlda.geometry(a, "cell_type", shared_topics={f"V{i + 1}": ["C", "A", "B"] for i in range(m)}))
-    yield "identity_explicit", dict(geometry=schlda.geometry(a, "cell_type", m, identity_topics={"A": 1, "B": ["B"], "C": 1}))
+    yield "groups_listed", dict(geometry=schlda.geometry(a, "cell_type", groups={"V": (["C", "A", "B"], [f"V{i + 1}" for i in range(m)])} if m else None))
+    yield "topics_explicit", dict(geometry=schlda.geometry(a, "cell_type", m, topics={"A": 1, "B": ["B"], "C": 1}))
+    yield "old_table", dict(geometry=pd.DataFrame({"topic": ["A", "B", "C"] + [f"V{i + 1}" for i in range(m)],
+                                                   "kind": ["identity"] * 3 + ["activity"] * m,
+                                                   "cell_types": ["A", "B", "C"] + ["all"] * m}))
 
 
 @pytest.mark.parametrize("case", list(CASES))
@@ -48,9 +51,9 @@ def obs(labels):
 def test_default_geometry():
     a = obs(["B", "A", "B"])
     g = schlda.geometry(a, "cell_type")
-    assert g.cell_types == ["A", "B"] and g.topic_names == ["A", "B"] and g.topic_types == ["identity"] * 2
+    assert g.cell_types == ["A", "B"] and g.topic_names == ["A", "B"] and g.groups == {} and g.identity_topics == ["A", "B"]
     g = schlda.geometry(a, "cell_type", 2)
-    assert g.topic_names == ["A", "B", "V1", "V2"] and g.topic_types == ["identity"] * 2 + ["activity"] * 2
+    assert g.topic_names == ["A", "B", "V1", "V2"] and g.topic_nodes == ["A", "B", "V", "V"] and g.activity_topics == ["V1", "V2"]
     assert g.allowed.tolist() == [[True, False, True, True], [False, True, True, True]]
     assert g.cell_node.tolist() == [1, 0, 1]
     assert g.resolve_alpha(1.0, 0.1).tolist() == [1.0, 1.0, 0.1, 0.1]
@@ -59,39 +62,42 @@ def test_default_geometry():
 def test_builder():
     a = obs(["B", "CD4T", "CD8T", "Mono"])
     g = schlda.geometry(a, "cell_type")
-    assert g.split("CD4T", 2).share("V1").share("lymphoid", ["B", "CD4T", "CD8T"]).share("mono_act", ["Mono"]) is g
-    assert g.topic_names == ["B", "CD4T_1", "CD4T_2", "CD8T", "Mono", "V1", "lymphoid", "mono_act"]
-    assert g.topic_types == ["identity"] * 5 + ["activity"] * 3
-    assert g.allowed_frame().loc["Mono"].tolist() == [0, 0, 0, 0, 1, 1, 0, 1]
+    assert g.topics("CD4T", 2).group("V1").group("lymphoid", ["B", "CD4T", "CD8T"]).group("myeloid", ["Mono", "B"], 2) is g
+    assert g.topic_names == ["B", "CD4T_1", "CD4T_2", "CD8T", "Mono", "V1", "lymphoid", "myeloid_1", "myeloid_2"]
+    assert g.topic_types == ["identity"] * 5 + ["activity"] * 4 and g.nodes == ["B", "CD4T", "CD8T", "Mono", "V1", "lymphoid", "myeloid"]
+    assert g.allowed_frame().loc["Mono"].tolist() == [0, 0, 0, 0, 1, 1, 0, 1, 1]
     text = g.describe()
-    assert "CD4T  (1 cells): CD4T_1, CD4T_2, V1, lymphoid" in text and "lymphoid <- B, CD4T, CD8T" in text
-    assert "V1 <- all" in text and "mono_act <- Mono" in text
-    assert g.resolve_alpha(1.0, 0.1).tolist() == [1, 0.5, 0.5, 1, 1, 0.1, 0.1, 0.1]
+    assert "CD4T  (1 cells): CD4T_1, CD4T_2, V1, lymphoid" in text and "lymphoid (lymphoid) <- B; CD4T; CD8T" in text
+    assert "V1 (V1) <- all" in text and "myeloid (myeloid_1, myeloid_2) <- Mono; B" in text
+    assert g.resolve_alpha(1.0, 0.1).tolist() == [1, 0.5, 0.5, 1, 1, 0.1, 0.1, 0.1, 0.1]
     g.alpha("V1", 0.05).alpha("CD4T_1", 2.0)
-    assert g.resolve_alpha(1.0, 0.1).tolist() == [1, 2.0, 0.5, 1, 1, 0.05, 0.1, 0.1]
-    g.drop("mono_act").split("CD4T", ["naive", "memory"]).split("B", 0)
-    assert g.topic_names == ["naive", "memory", "CD8T", "Mono", "V1", "lymphoid"]
+    assert g.resolve_alpha(1.0, 0.1).tolist() == [1, 2.0, 0.5, 1, 1, 0.05, 0.1, 0.1, 0.1]
+    g.topics("myeloid", 0).topics("CD4T", ["naive", "memory"]).topics("B", 0)
+    assert g.topic_names == ["naive", "memory", "CD8T", "Mono", "V1", "lymphoid"] and "myeloid" not in g.groups
     assert g.allowed_frame().loc["B"].tolist() == [0, 0, 0, 0, 1, 1]
-    g.split("B", 1)
-    assert g.topic_names[-1] == "B" and g.allowed_frame().loc["B", "B"]
+    g.topics("B", 1).topics("lymphoid", 2)
+    assert g.topic_names == ["B", "naive", "memory", "CD8T", "Mono", "V1", "lymphoid_1", "lymphoid_2"]
+    assert g.allowed_frame().loc["B", "B"] and g.resolve_alpha(1.0, 0.1).tolist()[-2:] == [0.1, 0.1]
+    assert g.drop("lymphoid_1").topic_names[-1] == "lymphoid_2" and g.members("lymphoid") == ["B", "CD4T", "CD8T"]
 
 
 def test_frame_round_trip(tmp_path):
     a = obs(["A", "B", "C"])
-    g = schlda.geometry(a, "cell_type", identity_topics={"A": 2}, shared_topics={"V1": "all", "AB": ["A", "B"]}).alpha("AB", 0.3)
+    g = schlda.geometry(a, "cell_type", topics={"A": 2}, groups={"V1": "all", "AB": ["A", "B"]}).alpha("AB", 0.3)
     f = g.to_frame()
-    assert f.columns.tolist() == ["topic", "kind", "cell_types", "alpha"]
+    assert f.columns.tolist() == ["topic", "node", "cell_types", "alpha"]
+    assert f.node.tolist() == ["A", "A", "B", "C", "V1", "AB"]
     assert f.cell_types.tolist() == ["A", "A", "B", "C", "all", "A; B"] and f.alpha.tolist()[-1] == 0.3
     assert np.isnan(f.alpha[0])
     g.to_csv(tmp_path / "g.csv")
     for src in (f, tmp_path / "g.csv", str(tmp_path / "g.csv")):
-        h = schlda.geometry(a, "cell_type", topics=src)
-        assert h.topic_names == g.topic_names and h.topic_types == g.topic_types
+        h = schlda.geometry(a, "cell_type", table=src)
+        assert h.topic_names == g.topic_names and h.topic_nodes == g.topic_nodes and h.groups == g.groups
         assert np.array_equal(h.allowed, g.allowed) and h.resolve_alpha(1, 0.1).tolist() == g.resolve_alpha(1, 0.1).tolist()
     filled = g.to_frame(1.0, 0.1)
     assert filled.alpha.tolist() == [0.5, 0.5, 1, 1, 0.1, 0.3]
-    assert schlda.geometry(a, "cell_type", topics=filled).resolve_alpha(7, 7).tolist() == filled.alpha.tolist()
-    assert g.record()[5] == {"topic": "AB", "kind": "activity", "cell_types": "A; B", "alpha": 0.3}
+    assert schlda.geometry(a, "cell_type", table=filled).resolve_alpha(7, 7).tolist() == filled.alpha.tolist()
+    assert g.record()[5] == {"topic": "AB", "node": "AB", "cell_types": "A; B", "alpha": 0.3}
 
 
 def test_bind_to_other_data():
@@ -103,29 +109,31 @@ def test_bind_to_other_data():
 
 
 @pytest.mark.parametrize("kw", [
-    dict(n_activity_topics=1, identity_topics={"Z": 2}),
-    dict(n_activity_topics=1, identity_topics={"A": -1}),
-    dict(n_activity_topics=1, identity_topics={"A": True}),
-    dict(n_activity_topics=1, identity_topics={"A": 1.5}),
-    dict(n_activity_topics=1, identity_topics={"A": ["x", 2]}),
-    dict(n_activity_topics=1, identity_topics=[("A", 2)]),
-    dict(n_activity_topics=0, identity_topics={"A": 0}),
-    dict(n_activity_topics=1, identity_topics={"A": ["B"]}),
-    dict(shared_topics={"V1": "A"}),
-    dict(shared_topics={"V1": []}),
-    dict(shared_topics={"V1": ["A", "A"]}),
-    dict(shared_topics={"V1": ["Z"]}),
-    dict(shared_topics={"V1": 3}),
-    dict(shared_topics={"A": "all"}),
-    dict(shared_topics=["V1"]),
-    dict(n_activity_topics=1, shared_topics={"V1": "all"}),
+    dict(n_activity_topics=1, topics={"Z": 2}),
+    dict(n_activity_topics=1, topics={"A": -1}),
+    dict(n_activity_topics=1, topics={"A": True}),
+    dict(n_activity_topics=1, topics={"A": 1.5}),
+    dict(n_activity_topics=1, topics={"A": ["x", 2]}),
+    dict(n_activity_topics=1, topics=[("A", 2)]),
+    dict(n_activity_topics=0, topics={"A": 0}),
+    dict(n_activity_topics=1, topics={"A": ["B"]}),
+    dict(groups={"V1": "A"}),
+    dict(groups={"V1": []}),
+    dict(groups={"V1": ["A"]}),
+    dict(groups={"V1": ["A", "A"]}),
+    dict(groups={"V1": ["Z"]}),
+    dict(groups={"V1": 3}),
+    dict(groups={"A": "all"}),
+    dict(groups=["V1"]),
+    dict(n_activity_topics=1, groups={"V1": "all"}),
     dict(n_activity_topics=-1),
     dict(n_activity_topics=1.0),
-    dict(n_activity_topics=1, topics=pd.DataFrame({"topic": ["A"], "kind": ["identity"], "cell_types": ["A"]})),
-    dict(topics=pd.DataFrame({"topic": ["A", "B", "C"], "kind": ["identity"] * 3})),
-    dict(topics=pd.DataFrame({"topic": ["A", "B", "C"], "kind": ["identity", "identity", "group"], "cell_types": list("ABC")})),
-    dict(topics=pd.DataFrame({"topic": ["AB", "C"], "kind": ["identity"] * 2, "cell_types": ["A; B", "C"]})),
-    dict(topics=pd.DataFrame({"topic": ["A", "B", "C"], "kind": ["identity"] * 3, "cell_types": list("ABC"), "alpha": [1, 1, -1]})),
+    dict(n_activity_topics=1, table=pd.DataFrame({"topic": ["A"], "node": ["A"], "cell_types": ["A"]})),
+    dict(table=pd.DataFrame({"topic": ["A", "B", "C"], "node": ["A", "B", "C"]})),
+    dict(table=pd.DataFrame({"topic": ["A", "B", "C"], "node": ["A", "B", "C"], "cell_types": ["A", "B", "A"]})),
+    dict(table=pd.DataFrame({"topic": ["AB", "C"], "node": ["AB", "C"], "cell_types": ["A", "C"]})),
+    dict(table=pd.DataFrame({"topic": ["X", "Y", "C"], "node": ["X", "X", "C"], "cell_types": ["A; B", "A", "C"]})),
+    dict(table=pd.DataFrame({"topic": ["A", "B", "C"], "node": ["A", "B", "C"], "cell_types": list("ABC"), "alpha": [1, 1, -1]})),
 ])
 def test_spec_errors(kw):
     with pytest.raises((ValueError, TypeError)):
@@ -134,13 +142,15 @@ def test_spec_errors(kw):
 
 def test_builder_errors():
     g = schlda.geometry(obs(["A", "B", "C"]), "cell_type", 1)
-    for call in (lambda: g.share("V1"), lambda: g.share("X", "A"), lambda: g.share("X", ["Z"]), lambda: g.share("X", ["A", "A"]),
-                 lambda: g.split("Z", 2), lambda: g.split("A", ["B"]), lambda: g.alpha("V1", 0), lambda: g.alpha("Q", 1),
-                 lambda: g.drop("Q"), lambda: g.share("", ["A"]), lambda: g.share("Y", [], )):
+    for call in (lambda: g.group("V"), lambda: g.group("X", "A"), lambda: g.group("X", ["Z"]), lambda: g.group("X", ["A", "A"]),
+                 lambda: g.group("X", ["A"]), lambda: g.group("X", ["A", "B"], ["B"]), lambda: g.topics("Z", 2),
+                 lambda: g.topics("A", ["B"]), lambda: g.alpha("V1", 0), lambda: g.alpha("Q", 1), lambda: g.drop("Q"),
+                 lambda: g.group("", ["A", "B"]), lambda: g.group("Y", [])):
         with pytest.raises((ValueError, TypeError, KeyError)):
             call()
+    assert g.topic_names == ["A", "B", "C", "V1"] and g.nodes == ["A", "B", "C", "V"]
     with pytest.raises(ValueError):
-        g.drop("V1").split("A", 0)
+        g.drop("V1").topics("A", 0)
     assert g.topic_names == ["A", "B", "C"]
 
 
@@ -187,7 +197,7 @@ def simulate_lineage(seed=0, n_per=60, n_genes=150):
 
 
 def lineage(a):
-    return schlda.geometry(a, "cell_type").share("V1").share("AB", ["A", "B"])
+    return schlda.geometry(a, "cell_type").group("V1").group("AB", ["A", "B"])
 
 
 def assert_mask_respected(res):
@@ -223,7 +233,7 @@ def test_identity_subtopics(tmp_path):
     p[100:120] = 1.0
     X[sub] = X[sub] + rng.multinomial(300, p / p.sum(), size=sub.sum())
     a.X = sp.csr_matrix(X)
-    res = schlda.fit_hlda(a, "cell_type", geometry=schlda.geometry(a, "cell_type", 1).split("A", 2), output_dir=tmp_path, **FIT)
+    res = schlda.fit_hlda(a, "cell_type", geometry=schlda.geometry(a, "cell_type", 1).topics("A", 2), output_dir=tmp_path, **FIT)
     assert res.identity_topics == ["A_1", "A_2", "B", "C"] and res.topics.alpha.tolist() == [0.5, 0.5, 1, 1, 0.1]
     tA = res.theta.loc[is_a, ["A_1", "A_2"]].to_numpy()
     assert np.abs(tA[sub[is_a]].mean(0) - tA[~sub[is_a]].mean(0)).max() > 0.3
@@ -251,4 +261,4 @@ def test_plots_and_h5ad_with_custom_geometry(tmp_path):
     schlda.structure_plot(res, save=tmp_path / "s.png")
     schlda.theta_heatmap(res, save=tmp_path / "h.png")
     a.write_h5ad(tmp_path / "fit.h5ad")
-    assert ad.read_h5ad(tmp_path / "fit.h5ad").uns["schlda"]["topic_types"].tolist() == res.topics.kind.tolist()
+    assert ad.read_h5ad(tmp_path / "fit.h5ad").uns["schlda"]["topic_types"].tolist() == res.geometry.topic_types

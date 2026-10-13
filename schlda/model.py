@@ -1,7 +1,7 @@
 """Hierarchical LDA for single-cell count data.
 
-By default one identity topic per annotated cell type, plus a set of activity
-topics that every cell may use; ``geometry(adata, key)`` builds any other
+Every annotated cell type carries its own topic(s), and groups of cell types
+carry topics shared by their members; ``geometry(adata, key)`` builds any such
 geometry (``_geometry``). A cell's tokens are only ever assigned to the topics
 its type may use.
 ``fit_hlda`` samples with the blocked kernel in ``_gibbs_blocked``; one thread
@@ -39,8 +39,8 @@ class HLDAResult:
         Genes x topics posterior mean, columns summing to 1. Indexed by
         ``adata.var_names``.
     topics
-        The geometry table: ``topic``, ``kind`` (``identity`` or ``activity``),
-        ``cell_types`` and the ``alpha`` used.
+        The geometry table: ``topic``, ``node`` (the cell type or group that
+        carries it), ``cell_types`` and the ``alpha`` used.
     cell_types
         The annotation the fit was conditioned on, aligned to ``theta``.
     params
@@ -61,11 +61,13 @@ class HLDAResult:
 
     @property
     def identity_topics(self) -> list[str]:
-        return self.topics.loc[self.topics.kind == "identity", "topic"].tolist()
+        """Topics carried by a cell type."""
+        return self.geometry.identity_topics
 
     @property
     def activity_topics(self) -> list[str]:
-        return self.topics.loc[self.topics.kind == "activity", "topic"].tolist()
+        """Topics carried by a group of cell types."""
+        return self.geometry.activity_topics
 
     @property
     def allowed(self) -> pd.DataFrame:
@@ -81,20 +83,20 @@ class HLDAResult:
         )
 
 
-def geometry(adata, cell_type_key, n_activity_topics=None, *, identity_topics=None, shared_topics=None, topics=None):
+def geometry(adata, cell_type_key, n_activity_topics=None, *, topics=None, groups=None, table=None):
     """A topic geometry for the cell types in ``adata.obs[cell_type_key]``.
 
-    With no other argument: one identity topic per cell type and no shared
-    topic. Edit it with ``g.split(type, n)``, ``g.share(name, types)``,
-    ``g.drop(name)``, ``g.alpha(name, value)``; ``g.describe()`` prints it,
-    ``g.to_frame()`` / ``g.to_csv()`` give the table that ``topics=`` (a
-    DataFrame or CSV path) reads back. Shortcuts: ``n_activity_topics=m``
-    adds ``V1 .. Vm`` for every type; ``identity_topics={type: n or [names]}``
-    and ``shared_topics={name: "all" or [types]}`` as in ``split`` / ``share``.
+    With no other argument every cell type carries one topic and there are
+    no groups. Edit it with ``g.topics(node, n)``, ``g.group(name, members,
+    n)``, ``g.drop(topic)``, ``g.alpha(topic, value)``; ``g.describe()``
+    prints it, ``g.to_frame()`` / ``g.to_csv()`` give the table that
+    ``table=`` (a DataFrame or CSV path) reads back. Shortcuts:
+    ``n_activity_topics=m`` is ``group("V", "all", ["V1", .., "Vm"])``;
+    ``topics={node: n or [names]}`` and ``groups={name: members or (members,
+    n or [names])}`` call the methods.
     """
     obs = adata if isinstance(adata, pd.DataFrame) else adata.obs
-    return _geometry.build(_geometry.get_labels(obs, cell_type_key), n_activity_topics,
-                           identity_topics, shared_topics, topics)
+    return _geometry.build(_geometry.get_labels(obs, cell_type_key), n_activity_topics, topics, groups, table)
 
 
 def fit_hlda(
@@ -129,13 +131,13 @@ def fit_hlda(
     cell_type_key
         Column in ``adata.obs`` giving each cell's type. No missing values.
     n_activity_topics
-        Number of activity topics ``V1 .. Vm`` (may be 0) shared by every
-        cell, on top of one identity topic per cell type. A cell's tokens may
-        only use its own identity topic or the activity topics.
+        Number of topics ``V1 .. Vm`` (may be 0) shared by every cell, on top
+        of one topic per cell type. A cell's tokens may only use its own type's
+        topic or the shared ones.
     geometry
         Any other geometry, replacing ``n_activity_topics``: a
         ``TopicGeometry`` from ``schlda.geometry``, or its table (DataFrame or
-        CSV path with columns ``topic, kind, cell_types, alpha``). Its cell
+        CSV path with columns ``topic, node, cell_types, alpha``). Its cell
         types must be those of ``adata.obs[cell_type_key]``.
     layer
         Layer to read counts from, e.g. ``"counts"``. Defaults to ``adata.X``.
@@ -156,9 +158,9 @@ def fit_hlda(
     alpha_beta
         Dirichlet concentration on the gene distributions.
     alpha_identity, alpha_activity
-        Dirichlet concentration on a cell's identity (split evenly over its
-        type's identity topics when it has several) and on each activity
-        topic. A topic whose ``alpha`` is set in the geometry keeps that value.
+        Dirichlet concentration on a cell type's own topics (``alpha_identity
+        / n`` on each of its ``n``) and on each group topic. A topic whose
+        ``alpha`` is set in the geometry keeps that value.
     seed
         Seeds initialisation and the chain. A run repeats exactly for a fixed
         ``seed`` and ``n_threads``.
@@ -191,7 +193,8 @@ def fit_hlda(
         raise ValueError("init='data_driven' was removed in 0.7.0; the chain starts from init='random'.")
     if init != "random":
         raise ValueError(f"init must be 'random', got {init!r}.")
-    alpha_identity, alpha_activity = _legacy(legacy, alpha_identity, alpha_activity)
+    if legacy:
+        raise TypeError(f"fit_hlda() got unexpected keyword argument(s) {sorted(legacy)}")
     alpha_identity, alpha_activity = _geometry._alpha(alpha_identity), _geometry._alpha(alpha_activity)
     alpha_beta = _geometry._alpha(alpha_beta)
 
@@ -330,23 +333,6 @@ def fit_hlda(
         output_dir=output_dir,
         geometry=geom,
     )
-
-
-def _legacy(kw, alpha_identity, alpha_activity):
-    """Map the 0.4/0.5 prior arguments; per-cell and depth-scaled priors are gone."""
-    for k in ("alpha_c_identity", "prior_scale_identity"):
-        if k in kw and (k == "prior_scale_identity" or not np.isscalar(kw[k])):
-            raise TypeError(f"{k} was removed in 0.6.0: the prior is a fixed alpha_identity / alpha_activity "
-                            f"(per topic via geometry.alpha).")
-    if "alpha_c" in kw:
-        warnings.warn("alpha_c is now alpha_activity", DeprecationWarning, stacklevel=3)
-        alpha_activity = kw.pop("alpha_c")
-    if "alpha_c_identity" in kw:
-        warnings.warn("alpha_c_identity is now alpha_identity", DeprecationWarning, stacklevel=3)
-        alpha_identity = kw.pop("alpha_c_identity")
-    if kw:
-        raise TypeError(f"fit_hlda() got unexpected keyword argument(s) {sorted(kw)}")
-    return alpha_identity, alpha_activity
 
 
 def _check_int(value, name, minimum=None):
