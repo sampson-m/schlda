@@ -115,6 +115,7 @@ def fit_hlda(
     alpha_beta=0.1,
     alpha_identity=1.0,
     alpha_activity=0.1,
+    alpha=None,
     seed=None,
     key_added="schlda",
     verbose=True,
@@ -160,7 +161,18 @@ def fit_hlda(
     alpha_identity, alpha_activity
         Dirichlet concentration on a cell type's own topics (``alpha_identity
         / n`` on each of its ``n``) and on each group topic. A topic whose
-        ``alpha`` is set in the geometry keeps that value.
+        ``alpha`` is set in the geometry keeps that value. Each is a float, one
+        value per cell (array, or Series indexed by ``adata.obs_names``), or
+        ``schlda.depth(kappa)``: ``kappa * L_i`` on cell ``i`` with ``L_i``
+        counts, so the prior is the same fraction ``kappa`` of every cell's
+        evidence (``depth(0.01)``: pseudo-counts worth 1 % of the cell's counts).
+    alpha
+        Overrides applied on top: a dict ``{node or topic: value}`` with values
+        of the same three forms (a cell type's value is split over its topics
+        like ``alpha_identity``; a topic name sets that topic), or a full array,
+        ``(K,)`` per topic or ``(n_cells, K)`` per cell and topic in the order
+        of ``res.topics`` (a DataFrame is aligned by column name), which
+        replaces every other setting.
     seed
         Seeds initialisation and the chain. A run repeats exactly for a fixed
         ``seed`` and ``n_threads``.
@@ -195,8 +207,10 @@ def fit_hlda(
         raise ValueError(f"init must be 'random', got {init!r}.")
     if legacy:
         raise TypeError(f"fit_hlda() got unexpected keyword argument(s) {sorted(legacy)}")
-    alpha_identity, alpha_activity = _geometry._alpha(alpha_identity), _geometry._alpha(alpha_activity)
+    alpha_identity = _geometry._spec(alpha_identity, "alpha_identity")
+    alpha_activity = _geometry._spec(alpha_activity, "alpha_activity")
     alpha_beta = _geometry._alpha(alpha_beta)
+    alpha_full = alpha is not None and not isinstance(alpha, dict)
 
     counts = _get_counts(adata, layer)
     labels = _geometry.get_labels(adata.obs, cell_type_key)
@@ -214,7 +228,7 @@ def fit_hlda(
     is_id = geom.identity_mask()
     n_identity = int(is_id.sum())
     n_activity = topic_types.count("activity")
-    alpha_topic = geom.resolve_alpha(alpha_identity, alpha_activity)
+    alpha_specs = None if alpha_full else geom.resolve_alpha(alpha_identity, alpha_activity, alpha)
 
     output_dir = _resolve_output_dir(output_dir)
     sample_dir = output_dir / "samples"
@@ -245,8 +259,14 @@ def fit_hlda(
     z = _init.initial_assignments(ident_rep, geom, rng, verbose=verbose)
     A, B, D = _gibbs.compute_count_tables(cell_idx, gene_idx, z, n_cells, n_genes, n_topics)
     cell_offsets = _gibbs_blocked.cell_offsets_from_idx(cell_idx, n_cells)
+    tokens_per_cell = np.diff(cell_offsets)
 
-    alpha = np.ascontiguousarray(np.broadcast_to(alpha_topic, (n_cells, n_topics)))
+    if alpha_full:
+        alpha_cells = _geometry.alpha_array(alpha, n_cells, n_topics, topic_names)
+    else:
+        alpha_cells = _geometry.specs_to_cells(alpha_specs, tokens_per_cell, adata.obs_names)
+    alpha_cells = np.ascontiguousarray(alpha_cells)
+    per_cell_prior = bool((alpha_cells != alpha_cells[0]).any())
 
     valid_topics, valid_offsets = geom.csr()
     block_bounds = _gibbs_blocked.make_blocks(cell_offsets, n_threads)
@@ -258,7 +278,14 @@ def fit_hlda(
 
     if verbose:
         print(f"[schlda] {cell_idx.shape[0]:,} tokens, {n_blocks} block(s)")
-        print(f"[schlda] prior: alpha_identity={alpha_identity:g} alpha_activity={alpha_activity:g}")
+        if alpha_full:
+            print(f"[schlda] prior: alpha array ({'per cell' if per_cell_prior else 'per topic'})")
+        else:
+            print(f"[schlda] prior: alpha_identity={_spec_str(alpha_identity)} alpha_activity={_spec_str(alpha_activity)}"
+                  + (f" alpha={ {k: _spec_str(v) for k, v in alpha.items()} }" if alpha else ""))
+        if per_cell_prior:
+            print(f"[schlda]        per-cell prior (median L_i {np.median(tokens_per_cell):.0f}); "
+                  f"median alpha per topic: {np.round(np.median(alpha_cells, 0), 3).tolist()}")
         print(f"[schlda] Gibbs: n_loops={n_loops} burn_in={burn_in} thin={thin} ({n_save} draws kept)")
 
     A_chain, D_chain = _gibbs.open_chains(sample_dir, n_save, n_genes, n_cells, n_topics)
@@ -267,7 +294,7 @@ def fit_hlda(
     for sweep in range(n_loops):
         seeds = _gibbs_blocked.block_seeds(chain_seed, sweep, n_blocks)
         _gibbs_blocked.gibbs_sweep(cell_offsets, gene_idx, z, identity_ints, valid_topics, valid_offsets,
-                                   A, B, D, np.float64(alpha_beta), alpha, block_bounds, seeds, dA, dB)
+                                   A, B, D, np.float64(alpha_beta), alpha_cells, block_bounds, seeds, dA, dB)
         if sweep >= burn_in and (sweep - burn_in + 1) % thin == 0:
             A_chain[cnt] = A
             D_chain[cnt] = D
@@ -285,7 +312,11 @@ def fit_hlda(
     beta, theta = _gibbs.posterior_means(
         A_chain, D_chain, n_save, adata.var_names, adata.obs_names, topic_names
     )
-    topics = geom.to_frame(alpha_identity, alpha_activity)
+    if alpha_full:
+        topics = geom.to_frame()
+        topics["alpha"] = alpha_cells[0].tolist() if not per_cell_prior else "per-cell"
+    else:
+        topics = geom.to_frame(alpha_identity, alpha_activity, alpha)
 
     params = {
         "cell_type_key": str(cell_type_key),
@@ -298,8 +329,11 @@ def fit_hlda(
         "thin": int(thin),
         "n_save": int(n_save),
         "alpha_beta": float(alpha_beta),
-        "alpha_identity": alpha_identity,
-        "alpha_activity": alpha_activity,
+        "alpha_identity": _spec_json(alpha_identity),
+        "alpha_activity": _spec_json(alpha_activity),
+        "alpha": ("array" if alpha_full else None if alpha is None
+                  else {str(k): _spec_json(v) for k, v in alpha.items()}),
+        "prior": "per_cell" if per_cell_prior else "fixed",
         "n_threads": int(n_threads),
         "n_blocks": int(n_blocks),
         "n_tokens": int(cell_idx.shape[0]),
@@ -310,6 +344,8 @@ def fit_hlda(
     beta.to_csv(output_dir / "HLDA_beta.csv")
     theta.to_csv(output_dir / "HLDA_theta.csv")
     topics.to_csv(output_dir / "topics.csv", index=False)
+    if per_cell_prior:
+        pd.DataFrame(alpha_cells, index=adata.obs_names, columns=topic_names).to_csv(output_dir / "alpha_cells.csv")
     _gibbs.write_sample_metadata(sample_dir, n_save, n_genes, n_cells, n_topics, topic_names, params)
 
     adata.obsm[f"{key_added}_theta"] = theta.to_numpy()
@@ -333,6 +369,14 @@ def fit_hlda(
         output_dir=output_dir,
         geometry=geom,
     )
+
+
+def _spec_str(s):
+    return f"{s:g}" if isinstance(s, float) else repr(s) if isinstance(s, _geometry.Depth) else "per-cell"
+
+
+def _spec_json(s):
+    return s if isinstance(s, float) else _spec_str(s)
 
 
 def _check_int(value, name, minimum=None):

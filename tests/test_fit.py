@@ -93,3 +93,91 @@ def test_prior_errors(tmp_path, kw):
     a, _, _ = simulate()
     with pytest.raises(ValueError):
         schlda.fit_hlda(a, "cell_type", 1, output_dir=tmp_path / "x", **{**SHORT, **kw})
+
+
+def _L(a):
+    return np.asarray(a.X.sum(1)).ravel().astype(float)
+
+
+def test_depth_equals_explicit_per_cell(tmp_path):
+    a, _, _ = simulate()
+    L = _L(a)
+    d = schlda.fit_hlda(a, "cell_type", 1, output_dir=tmp_path / "d", alpha_identity=schlda.depth(0.005), **SHORT)
+    e = schlda.fit_hlda(a, "cell_type", 1, output_dir=tmp_path / "e", alpha_identity=0.005 * L, **SHORT)
+    assert np.array_equal(d.theta.to_numpy(), e.theta.to_numpy())
+    assert d.params["alpha_identity"] == "depth(0.005)" and d.params["prior"] == "per_cell"
+    assert d.topics.alpha.tolist() == ["depth(0.005)"] * 3 + [0.1]
+    ac = pd.read_csv(tmp_path / "d" / "alpha_cells.csv", index_col=0)
+    assert ac.shape == (a.n_obs, 4) and np.allclose(ac["A"], 0.005 * L) and np.allclose(ac["V1"], 0.1)
+    assert e.params["prior"] == "per_cell" and e.params["alpha_identity"] == "per-cell"
+
+
+def test_series_alpha_aligned_by_name(tmp_path):
+    a, _, _ = simulate()
+    L = _L(a)
+    s = pd.Series(0.005 * L, index=a.obs_names).iloc[::-1]          # reversed order, aligned by name
+    d = schlda.fit_hlda(a, "cell_type", 1, output_dir=tmp_path / "d", alpha_identity=schlda.depth(0.005), **SHORT)
+    e = schlda.fit_hlda(a, "cell_type", 1, output_dir=tmp_path / "e", alpha_identity=s, **SHORT)
+    assert np.array_equal(d.theta.to_numpy(), e.theta.to_numpy())
+
+
+def test_alpha_dict_matches_geometry_and_floats(tmp_path):
+    a, _, _ = simulate()
+    g = schlda.geometry(a, "cell_type", 2).topics("A", 2)
+    base = schlda.fit_hlda(a, "cell_type", geometry=g, output_dir=tmp_path / "0", **SHORT)
+    byg = schlda.fit_hlda(a, "cell_type", geometry=schlda.geometry(a, "cell_type", 2).topics("A", 2).alpha("V2", 0.3),
+                          output_dir=tmp_path / "1", **SHORT)
+    byd = schlda.fit_hlda(a, "cell_type", geometry=g, alpha={"V2": 0.3}, output_dir=tmp_path / "2", **SHORT)
+    assert np.array_equal(byg.theta.to_numpy(), byd.theta.to_numpy())
+    assert not np.array_equal(base.theta.to_numpy(), byd.theta.to_numpy())
+    node = schlda.fit_hlda(a, "cell_type", geometry=g, alpha={"A": 3.0, "V": 0.3}, output_dir=tmp_path / "3", **SHORT)
+    assert node.topics.alpha.tolist() == [1.5, 1.5, 1.0, 1.0, 0.3, 0.3]        # cell type split, group not
+    assert node.params["alpha"] == {"A": 3.0, "V": 0.3} and node.params["prior"] == "fixed"
+    arr = schlda.fit_hlda(a, "cell_type", geometry=g, alpha=np.array([1.5, 1.5, 1.0, 1.0, 0.3, 0.3]),
+                          output_dir=tmp_path / "4", **SHORT)
+    assert np.array_equal(arr.theta.to_numpy(), node.theta.to_numpy()) and arr.params["alpha"] == "array"
+    full = np.tile([1.5, 1.5, 1.0, 1.0, 0.3, 0.3], (a.n_obs, 1))
+    arr2 = schlda.fit_hlda(a, "cell_type", geometry=g, alpha=pd.DataFrame(full, index=a.obs_names, columns=g.topic_names),
+                           output_dir=tmp_path / "5", **SHORT)
+    assert np.array_equal(arr2.theta.to_numpy(), node.theta.to_numpy())
+
+
+def test_depth_in_dict_and_table_roundtrip(tmp_path):
+    a, _, _ = simulate()
+    g = schlda.geometry(a, "cell_type", 1).alpha("V1", schlda.depth(0.0005))
+    f = g.to_frame()
+    assert f.alpha.tolist()[-1] == "depth(0.0005)" and f.alpha.isna().sum() == 3
+    h = schlda.geometry(a, "cell_type", table=f)
+    assert h.resolve_alpha(1.0, 0.1) == [1.0, 1.0, 1.0, schlda.depth(0.0005)]
+    res = schlda.fit_hlda(a, "cell_type", 1, alpha={"B": schlda.depth(0.01)}, output_dir=tmp_path / "x", **SHORT)
+    ac = pd.read_csv(tmp_path / "x" / "alpha_cells.csv", index_col=0)
+    L = _L(a)
+    assert np.allclose(ac["B"], 0.01 * L) and np.allclose(ac["A"], 1.0)
+    assert res.topics.alpha.tolist() == [1.0, "depth(0.01)", 1.0, 0.1]
+    with pytest.raises(ValueError, match="per-cell"):
+        schlda.geometry(a, "cell_type", table=f.assign(alpha=["per-cell", None, None, None]))
+
+
+@pytest.mark.parametrize("kw", [
+    dict(alpha_identity=-np.ones(180)),
+    dict(alpha_identity=np.ones(10)),
+    dict(alpha=np.ones(3)),
+    dict(alpha=np.zeros((180, 4))),
+    dict(alpha={"A": -1.0}),
+])
+def test_alpha_value_errors(tmp_path, kw):
+    a, _, _ = simulate()
+    with pytest.raises(ValueError):
+        schlda.fit_hlda(a, "cell_type", 1, output_dir=tmp_path / "x", **{**SHORT, **kw})
+
+
+def test_depth_rejects_nonpositive():
+    for v in (0.0, -1.0, np.nan):
+        with pytest.raises(ValueError):
+            schlda.depth(v)
+
+
+def test_alpha_key_error(tmp_path):
+    a, _, _ = simulate()
+    with pytest.raises(KeyError):
+        schlda.fit_hlda(a, "cell_type", 1, output_dir=tmp_path / "x", alpha={"nope": 1.0}, **SHORT)

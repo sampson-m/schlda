@@ -6,6 +6,10 @@ Dirichlet concentration on each topic.
 removes a topic and ``alpha`` sets one topic's concentration. A cell may use the topics of its own type and of
 every group containing its type. ``to_frame`` / ``from_frame`` round-trip the table ``topic, node, cell_types,
 alpha``. Identity topics are those of a cell type node; activity topics those of a group — a view, not a label.
+
+A concentration ("alpha spec") is a positive float, one value per cell (array or Series), or ``depth(kappa)``:
+``kappa * L_i`` for cell ``i`` with ``L_i`` tokens, i.e. pseudo-counts equal to the fraction ``kappa`` of the cell's own
+counts. ``specs_to_cells`` turns the per-topic specs into the cells x topics array the sampler takes.
 """
 
 from __future__ import annotations
@@ -19,11 +23,31 @@ import pandas as pd
 SEP = "; "
 
 
+@dataclass(frozen=True)
+class Depth:
+    """``depth(kappa)``: concentration ``kappa * L_i`` on cell ``i`` with ``L_i`` tokens."""
+    value: float
+
+    def __post_init__(self):
+        object.__setattr__(self, "value", _alpha(self.value))
+
+    def __repr__(self):
+        return f"depth({self.value:g})"
+
+    def __truediv__(self, n):
+        return Depth(self.value / n)
+
+
+def depth(kappa):
+    """Depth-scaled concentration ``kappa * L_i``: the prior carries the same share ``kappa`` of every cell's counts."""
+    return Depth(kappa)
+
+
 @dataclass
 class Topic:
     name: str
     node: str
-    alpha: float | None = None
+    alpha: object = None   # None (node default), float, per-cell array, or Depth
 
 
 class TopicGeometry:
@@ -61,8 +85,9 @@ class TopicGeometry:
         return self._commit(self.groups, [x for x in self._topics if x is not self._topic(name)])
 
     def alpha(self, name, value):
-        """Set one topic's concentration (``None`` restores the node default)."""
-        self._topic(name).alpha = None if value is None else _alpha(value)
+        """Set one topic's concentration: a float, one value per cell, or ``depth(kappa)`` (``None`` restores the
+        node default)."""
+        self._topic(name).alpha = None if value is None else _spec(value, f"alpha({name!r})")
         return self
 
     def _set_topics(self, node, n_or_names, alpha=None):
@@ -74,7 +99,7 @@ class TopicGeometry:
         own = [i for i, x in enumerate(self._topics) if x.node == node]
         pos = own[0] if own else self._insert_at(node)
         keep = [x for i, x in enumerate(self._topics) if i not in own]
-        a = None if alpha is None else _alpha(alpha)
+        a = None if alpha is None else _spec(alpha, f"group({node!r}) alpha")
         return self._commit(self.groups, keep[:pos] + [Topic(k, node, a) for k in names] + keep[pos:])
 
     def _insert_at(self, node):
@@ -142,21 +167,42 @@ class TopicGeometry:
         offsets = np.concatenate([[0], np.cumsum(m.sum(1))]).astype(np.int32)
         return np.nonzero(m)[1].astype(np.int32), offsets
 
-    def resolve_alpha(self, alpha_identity, alpha_activity):
-        """Concentration per topic: ``alpha_identity / n`` over a cell type's ``n`` topics, ``alpha_activity`` on a
-        group's topics, unless set on the topic."""
-        n = {node: len(self.topics_of(node)) for node in self.cell_types}
-        return np.array([x.alpha if x.alpha is not None else
-                         alpha_identity / n[x.node] if x.node in self.cell_types else alpha_activity
-                         for x in self._topics], dtype=np.float64)
+    def resolve_alpha(self, alpha_identity, alpha_activity, alpha=None):
+        """One alpha spec per topic (float, per-cell array or ``Depth``).
 
-    def to_frame(self, alpha_identity=None, alpha_activity=None):
-        """The table ``topic, node, cell_types, alpha``; alpha filled in when both defaults are given."""
-        a = (self.resolve_alpha(alpha_identity, alpha_activity) if alpha_identity is not None
+        A cell type's ``n`` topics share ``alpha_identity`` (``/ n`` each); a group's topics each take
+        ``alpha_activity``; a spec set on the topic (``g.alpha``) replaces the default. ``alpha`` is a dict
+        ``{node or topic: spec}`` applied last: a node key is spread over its topics like the defaults, a topic
+        key sets that topic.
+        """
+        n = {node: len(self.topics_of(node)) for node in self.cell_types}
+        over = _dict(alpha, "alpha")
+        bad = [k for k in over if k not in self.nodes and k not in self.topic_names]
+        if bad:
+            raise KeyError(f"alpha keys {bad} are neither nodes {self.nodes} nor topics {self.topic_names}.")
+        out = []
+        for x in self._topics:
+            div = n[x.node] if x.node in self.cell_types else 1
+            if x.name in over:
+                s = _spec(over[x.name], f"alpha[{x.name!r}]")
+            elif x.node in over:
+                s = _spec(over[x.node], f"alpha[{x.node!r}]") / div
+            elif x.alpha is not None:
+                s = x.alpha
+            else:
+                s = alpha_identity / div if x.node in self.cell_types else alpha_activity
+            out.append(s)
+        return out
+
+    def to_frame(self, alpha_identity=None, alpha_activity=None, alpha=None):
+        """The table ``topic, node, cell_types, alpha``; alpha filled in when both defaults are given. A
+        depth-scaled alpha prints as ``depth(kappa)`` and a per-cell one as ``per-cell``."""
+        a = (self.resolve_alpha(alpha_identity, alpha_activity, alpha) if alpha_identity is not None
              else [x.alpha for x in self._topics])
-        return pd.DataFrame({"topic": self.topic_names, "node": self.topic_nodes,
-                             "cell_types": [self._members_str(x.node) for x in self._topics],
-                             "alpha": a}).astype({"alpha": float})
+        a = [_spec_repr(s) for s in a]
+        f = pd.DataFrame({"topic": self.topic_names, "node": self.topic_nodes,
+                          "cell_types": [self._members_str(x.node) for x in self._topics], "alpha": a})
+        return f.astype({"alpha": float}) if all(isinstance(s, float) or s is None for s in a) else f
 
     def _members_str(self, node):
         m = self.members(node)
@@ -188,9 +234,7 @@ class TopicGeometry:
                 if len(m) < 2 or len(set(m)) != len(m):
                     raise ValueError(f"group {node!r}: cell_types must list at least two distinct cell types.")
                 g.groups[node] = m
-            a = getattr(r, "alpha", None)
-            a = None if a is None or (isinstance(a, float) and np.isnan(a)) else _alpha(a)
-            g._topics.append(Topic(_name(r.topic), node, a))
+            g._topics.append(Topic(_name(r.topic), node, _parse_alpha(getattr(r, "alpha", None), r.topic)))
         return g._commit(g.groups, g._topics)
 
     def bind(self, labels):
@@ -327,3 +371,94 @@ def _alpha(v):
     if not (np.isscalar(v) and np.isfinite(v) and float(v) > 0):
         raise ValueError(f"alpha must be a positive number, got {v!r}.")
     return float(v)
+
+
+def _spec(v, what="alpha"):
+    """Validate an alpha spec: float, ``Depth``, or one positive value per cell (array / Series; length checked
+    when the cells are known)."""
+    if isinstance(v, Depth):
+        return v
+    if isinstance(v, pd.Series) or (isinstance(v, (np.ndarray, list, tuple)) and not np.isscalar(v)):
+        a = v if isinstance(v, pd.Series) else np.asarray(v, dtype=np.float64)
+        vals = a.to_numpy(dtype=np.float64) if isinstance(a, pd.Series) else a
+        if vals.ndim != 1:
+            raise ValueError(f"{what}: a per-cell alpha must be one-dimensional, got shape {vals.shape}.")
+        if not (np.all(np.isfinite(vals)) and np.all(vals > 0)):
+            raise ValueError(f"{what}: every per-cell alpha must be a positive number.")
+        return a
+    try:
+        return _alpha(v)
+    except ValueError:
+        raise ValueError(f"{what} must be a positive number, one value per cell, or depth(kappa); got {v!r}.") from None
+
+
+def _spec_repr(s):
+    if s is None or isinstance(s, float):
+        return s
+    return repr(s) if isinstance(s, Depth) else "per-cell"
+
+
+def _parse_alpha(a, topic):
+    """The alpha cell of a geometry table: empty, a number, or ``depth(kappa)``."""
+    if a is None or (isinstance(a, float) and np.isnan(a)):
+        return None
+    if isinstance(a, str):
+        s = a.strip()
+        if s == "" or s.lower() == "nan":
+            return None
+        if s.startswith("depth(") and s.endswith(")"):
+            return Depth(float(s[6:-1]))
+        if s == "per-cell":
+            raise ValueError(f"topic {topic!r}: a per-cell alpha cannot be read from a table; pass it with "
+                             f"alpha={{{topic!r}: array}} or g.alpha({topic!r}, array).")
+        try:
+            return _alpha(float(s))
+        except ValueError:
+            raise ValueError(f"topic {topic!r}: alpha must be a number or depth(kappa), got {a!r}.") from None
+    return _alpha(a)
+
+
+def specs_to_cells(specs, tokens_per_cell, obs_names):
+    """Cells x topics alpha from one spec per topic: a float broadcasts, ``depth(kappa)`` is ``kappa * L_i``, a
+    per-cell array is used as given (a Series is aligned to ``obs_names``)."""
+    L = np.asarray(tokens_per_cell, dtype=np.float64)
+    n = L.shape[0]
+    out = np.empty((n, len(specs)), dtype=np.float64)
+    for k, s in enumerate(specs):
+        if isinstance(s, float):
+            out[:, k] = s
+        elif isinstance(s, Depth):
+            out[:, k] = s.value * L
+        else:
+            out[:, k] = per_cell(s, n, obs_names, f"alpha of topic {k}")
+    return out
+
+
+def per_cell(v, n_cells, obs_names, what):
+    if isinstance(v, pd.Series):
+        missing = [c for c in obs_names if c not in v.index]
+        if missing:
+            raise ValueError(f"{what}: Series lacks {len(missing)} cell(s) of adata.obs_names (e.g. {missing[0]!r}).")
+        v = v.reindex(obs_names).to_numpy(dtype=np.float64)
+    v = np.asarray(v, dtype=np.float64)
+    if v.shape != (n_cells,):
+        raise ValueError(f"{what}: expected one value per cell ({n_cells}), got shape {v.shape}.")
+    return v
+
+
+def alpha_array(alpha, n_cells, n_topics, topic_names):
+    """``alpha=`` given as an array: ``(K,)`` per topic or ``(n_cells, K)`` per cell and topic, in geometry
+    topic order; a DataFrame is aligned by column name."""
+    if isinstance(alpha, pd.DataFrame):
+        missing = [t for t in topic_names if t not in alpha.columns]
+        if missing:
+            raise ValueError(f"alpha DataFrame lacks topic column(s) {missing}.")
+        alpha = alpha[topic_names].to_numpy()
+    a = np.asarray(alpha, dtype=np.float64)
+    if a.shape == (n_topics,):
+        a = np.broadcast_to(a, (n_cells, n_topics))
+    elif a.shape != (n_cells, n_topics):
+        raise ValueError(f"alpha array must have shape ({n_topics},) or ({n_cells}, {n_topics}), got {a.shape}.")
+    if not (np.all(np.isfinite(a)) and np.all(a > 0)):
+        raise ValueError("every alpha must be a positive number.")
+    return np.ascontiguousarray(a)

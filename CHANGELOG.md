@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.9.0 — 2026-10-14
+
+- Theta prior: every concentration (`alpha_identity`, `alpha_activity`,
+  `g.alpha(topic, value)`, the values of the new `alpha=` dict) is a float,
+  one value per cell (array or Series indexed by `obs_names`), or
+  `schlda.depth(kappa)` — `kappa * L_i`, pseudo-counts equal to the fraction
+  `kappa` of each cell's counts, so the prior carries the same share of every
+  cell's evidence. This restores the depth-scaled identity prior removed in
+  0.6.0 (`prior_scale_identity=kappa` is `depth(kappa)`), now available on
+  every concentration.
+- `fit_hlda(..., alpha=)`: a dict `{node or topic: value}` applied on top of
+  the defaults (a cell type's value split over its topics, a topic name set
+  directly), or a full `(K,)` / `(n_cells, K)` array in `res.topics` order
+  (a DataFrame aligned by column) that replaces everything.
+- `topics.csv` writes `depth(kappa)` / `per-cell` in the `alpha` column and
+  reads `depth(kappa)` back; a prior that varies by cell is written to
+  `alpha_cells.csv`; `res.params` gains `alpha` and `prior`
+  (`"fixed"` / `"per_cell"`). `TopicGeometry.resolve_alpha` returns a list of
+  specs rather than an array.
+- Defaults unchanged: fits with float priors reproduce 0.8.0 exactly.
+- Vignette rewritten: a lineage tree (lymphoid / myeloid branches with a
+  shared topic each, plus a stress topic), the prior forms, a label hiding two
+  cell states (resolved by a second topic for the label, not by the prior),
+  and an activity program that modulates identity (where the identity prior
+  decides what the shared topic holds, and `depth(kappa)` applies it evenly
+  across sequencing depths). The README passage on identity collapse is gone.
+
 ## 0.8.0 — 2026-10-13
 
 - Geometry is built from nodes, not labelled topics. A node is a cell type or

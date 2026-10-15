@@ -68,6 +68,7 @@ Use `key_added` to fit several models into one object.
 HLDA_beta.csv           genes x topics posterior mean
 HLDA_theta.csv          cells x topics posterior mean
 topics.csv              the geometry: topic, node, cell_types, alpha
+alpha_cells.csv         cells x topics prior, only when it varies by cell
 samples/A_chain.memmap  (n_save, n_genes, n_topics) int32 gene-topic counts
 samples/D_chain.memmap  (n_save, n_cells, n_topics) int32 cell-topic counts
 samples/samples_meta.json   shapes, topic names, run parameters
@@ -101,6 +102,7 @@ Every token starts on a topic drawn uniformly from those its cell may use;
 | `alpha_beta` | 0.1 | Dirichlet concentration on gene distributions |
 | `alpha_identity` | 1.0 | concentration on a cell type's own topics (see [Theta prior](#theta-prior)) |
 | `alpha_activity` | 0.1 | concentration on each shared topic |
+| `alpha` | `None` | per-node / per-topic overrides, or a full array |
 | `seed` | `None` | seeds init and the chain |
 | `report_every` | 100 | sweeps between progress lines |
 
@@ -136,14 +138,41 @@ alpha_k = alpha_identity / n(c)   for each of the n(c) topics of type c
 alpha_k = alpha_activity          for a group's topic
 ```
 
-The prior is part of the geometry: `res.topics` / `topics.csv` list the
-`alpha` of every topic, and `g.alpha(name, value)` sets one topic's value.
+Every concentration — `alpha_identity`, `alpha_activity`, a value set with
+`g.alpha(topic, value)` or passed in the `alpha=` dict — takes one of three
+forms:
+
+| form | `alpha_ik` for cell `i`, topic `k` |
+| --- | --- |
+| a float `a` | `a` for every cell |
+| one value per cell (array, or Series indexed by `adata.obs_names`) | that cell's value |
+| `schlda.depth(kappa)` | `kappa * L_i`, with `L_i` the cell's total counts |
+
+`depth(kappa)` scales the prior with sequencing depth: the pseudo-counts are
+the fraction `kappa` of each cell's own counts (`depth(0.01)` is 1 % of every
+cell's counts), so the prior carries the same share of every cell's evidence
+whatever its depth, instead of a fixed number of pseudo-counts that is strong
+for a shallow cell and negligible for a deep one. When every cell has the
+same depth, `depth(kappa)` is the fixed value `kappa * L`.
+
+`alpha=` overrides single entries: a dict keyed by node or topic, with values
+of the same three forms (a cell type's value is split over its topics like
+`alpha_identity`, a topic name sets that topic), or a full array — `(K,)` per
+topic or `(n_cells, K)` per cell and topic, in the order of `res.topics` — that
+replaces every other setting.
 
 ```python
 schlda.fit_hlda(adata, "cell_type", 1, alpha_identity=5.0)
+schlda.fit_hlda(adata, "cell_type", 1, alpha_identity=schlda.depth(0.01))
+schlda.fit_hlda(adata, "cell_type", 2, alpha={"CD4T": 3.0, "V2": schlda.depth(0.001)})
 g = schlda.geometry(adata, "cell_type", 2).alpha("V2", 0.01)
 schlda.fit_hlda(adata, "cell_type", geometry=g)
 ```
+
+`res.topics` / `topics.csv` record the `alpha` of every topic (`depth(kappa)`
+written as such, a per-cell value as `per-cell`); a prior that varies by cell
+is also written out as `alpha_cells.csv`, and `res.params["prior"]` is
+`"fixed"` or `"per_cell"`.
 
 The sampler is collapsed: each token's topic is drawn from
 
@@ -231,10 +260,9 @@ at least one topic it may use, and the geometry's cell types must be those of
 the column the fit conditions on (`res.allowed` is the derived cell type x
 topic mask).
 
-How many topics a type needs, and which types share one, is read off a fit
-rather than set by rule; `examples/vignette.py` (sections 3d–3e) shows the
-diagnostics on a simulated hidden substate — a type whose cells end up with
-no weight on their own topic, and the extra topic that recovers them.
+`examples/vignette.py` fits a lineage tree — lymphoid and myeloid branches,
+each with a shared topic, plus a topic for every cell (3c) — and a label
+hiding two cell states, which a second topic for that label resolves (3e).
 
 ## Plot
 
@@ -315,12 +343,16 @@ Other knobs: `topic_order`, `group_order`, `colors`, `max_cells_per_group`,
 
 ## Example
 
-`examples/vignette.py` simulates four cell types plus one planted activity
-program, fits the model in under a minute, checks that the program was
-recovered, draws the fit next to the simulation truth on a shared cell order,
-fits a custom geometry (3c), and on a second simulation with a hidden
-substate shows a type losing its cells to a shared topic, the extra topic
-that recovers them (3d), and how to read that off a default fit (3e):
+`examples/vignette.py` simulates five cell types in two lineage branches,
+each branch with a shared program, plus a stress program active in every type;
+fits the default geometry and the lineage tree (3c); shows the fixed,
+depth-scaled and array forms of the theta prior (3d); then two situations met
+in practice — a label that hides two cell states, resolved by giving that
+label a second topic (3e), and an activity program that modulates the cell's
+own program, where the identity prior decides what the shared topic holds and
+`depth(kappa)` applies it evenly across sequencing depths (3f) — and draws the
+fits next to the simulation truth on shared cell orders. It runs in a few
+minutes:
 
 ```bash
 python examples/vignette.py vignette_out

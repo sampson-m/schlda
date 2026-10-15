@@ -16,9 +16,9 @@ The plots take a theta from any method, so fits from other models can be drawn
 the same way and compared on a shared cell order (see ``cell_order``).
 """
 
-from ._geometry import TopicGeometry
+from ._geometry import TopicGeometry, depth
 from .model import HLDAResult, fit_hlda, geometry
 from .plotting import cell_order, structure_plot, theta_heatmap
 
-__all__ = ["fit_hlda", "geometry", "TopicGeometry", "HLDAResult", "structure_plot", "theta_heatmap", "cell_order"]
-__version__ = "0.8.0"
+__all__ = ["fit_hlda", "geometry", "depth", "TopicGeometry", "HLDAResult", "structure_plot", "theta_heatmap", "cell_order"]
+__version__ = "0.9.0"

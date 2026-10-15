@@ -56,7 +56,7 @@ def test_default_geometry():
     assert g.topic_names == ["A", "B", "V1", "V2"] and g.topic_nodes == ["A", "B", "V", "V"] and g.activity_topics == ["V1", "V2"]
     assert g.allowed.tolist() == [[True, False, True, True], [False, True, True, True]]
     assert g.cell_node.tolist() == [1, 0, 1]
-    assert g.resolve_alpha(1.0, 0.1).tolist() == [1.0, 1.0, 0.1, 0.1]
+    assert g.resolve_alpha(1.0, 0.1) == [1.0, 1.0, 0.1, 0.1]
 
 
 def test_builder():
@@ -69,15 +69,15 @@ def test_builder():
     text = g.describe()
     assert "CD4T  (1 cells): CD4T_1, CD4T_2, V1, lymphoid" in text and "lymphoid (lymphoid) <- B; CD4T; CD8T" in text
     assert "V1 (V1) <- all" in text and "myeloid (myeloid_1, myeloid_2) <- Mono; B" in text
-    assert g.resolve_alpha(1.0, 0.1).tolist() == [1, 0.5, 0.5, 1, 1, 0.1, 0.1, 0.1, 0.1]
+    assert g.resolve_alpha(1.0, 0.1) == [1, 0.5, 0.5, 1, 1, 0.1, 0.1, 0.1, 0.1]
     g.alpha("V1", 0.05).alpha("CD4T_1", 2.0)
-    assert g.resolve_alpha(1.0, 0.1).tolist() == [1, 2.0, 0.5, 1, 1, 0.05, 0.1, 0.1, 0.1]
+    assert g.resolve_alpha(1.0, 0.1) == [1, 2.0, 0.5, 1, 1, 0.05, 0.1, 0.1, 0.1]
     g.topics("myeloid", 0).topics("CD4T", ["naive", "memory"]).topics("B", 0)
     assert g.topic_names == ["naive", "memory", "CD8T", "Mono", "V1", "lymphoid"] and "myeloid" not in g.groups
     assert g.allowed_frame().loc["B"].tolist() == [0, 0, 0, 0, 1, 1]
     g.topics("B", 1).topics("lymphoid", 2)
     assert g.topic_names == ["B", "naive", "memory", "CD8T", "Mono", "V1", "lymphoid_1", "lymphoid_2"]
-    assert g.allowed_frame().loc["B", "B"] and g.resolve_alpha(1.0, 0.1).tolist()[-2:] == [0.1, 0.1]
+    assert g.allowed_frame().loc["B", "B"] and g.resolve_alpha(1.0, 0.1)[-2:] == [0.1, 0.1]
     assert g.drop("lymphoid_1").topic_names[-1] == "lymphoid_2" and g.members("lymphoid") == ["B", "CD4T", "CD8T"]
 
 
@@ -93,10 +93,10 @@ def test_frame_round_trip(tmp_path):
     for src in (f, tmp_path / "g.csv", str(tmp_path / "g.csv")):
         h = schlda.geometry(a, "cell_type", table=src)
         assert h.topic_names == g.topic_names and h.topic_nodes == g.topic_nodes and h.groups == g.groups
-        assert np.array_equal(h.allowed, g.allowed) and h.resolve_alpha(1, 0.1).tolist() == g.resolve_alpha(1, 0.1).tolist()
+        assert np.array_equal(h.allowed, g.allowed) and h.resolve_alpha(1, 0.1) == g.resolve_alpha(1, 0.1)
     filled = g.to_frame(1.0, 0.1)
     assert filled.alpha.tolist() == [0.5, 0.5, 1, 1, 0.1, 0.3]
-    assert schlda.geometry(a, "cell_type", table=filled).resolve_alpha(7, 7).tolist() == filled.alpha.tolist()
+    assert schlda.geometry(a, "cell_type", table=filled).resolve_alpha(7, 7) == filled.alpha.tolist()
     assert g.record()[5] == {"topic": "AB", "node": "AB", "cell_types": "A; B", "alpha": 0.3}
 
 
