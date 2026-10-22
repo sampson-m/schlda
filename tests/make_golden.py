@@ -9,11 +9,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_fit import simulate  # noqa: E402
 import schlda  # noqa: E402
 
-RUN = dict(n_loops=60, burn_in=30, thin=5, seed=11, verbose=False)
+RUN = dict(n_loops=60, burn_in=30, thin=5, seed=11, verbose=False, plots=False)
 CASES = {
-    "random_m1_t1": dict(n_activity_topics=1, init="random", n_threads=1),
-    "random_m2_t2": dict(n_activity_topics=2, init="random", n_threads=2),
-    "random_m0_t1": dict(n_activity_topics=0, init="random", n_threads=1),
+    "random_m1_t1": dict(n_activity_topics=1, n_threads=1),
+    "random_m2_t2": dict(n_activity_topics=2, n_threads=2),
+    "random_m0_t1": dict(n_activity_topics=0, n_threads=1),
 }
 # v0.4.0 fits used alpha 0.1 on every topic; 0.6.0 defaults to alpha_identity = 1, so the golden runs pass it.
 # The v0.4.0 cases with a depth-scaled or per-cell prior (data_m2_t2_kappa, data_m3_t1_vec) or the data-driven

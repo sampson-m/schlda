@@ -19,21 +19,20 @@ def _pick(topics, offsets, nodes, rng):
     return topics[start + j].astype(np.int32)
 
 
-def initial_assignments(node_rep, geometry, rng, verbose=True):
+def initial_assignments(node_rep, geometry, rng, log=print):
     """Return the initial topic of every token (``node_rep`` = cell type index per token)."""
     valid_t, valid_o = geometry.csr()
     z0 = _pick(valid_t, valid_o, node_rep, rng)
-    if verbose:
-        _report(z0, geometry)
+    _report(z0, geometry, log)
     return z0
 
 
-def _report(z0, geometry):
+def _report(z0, geometry, log):
     n_tokens = z0.shape[0]
     is_id = geometry.identity_mask()
     share = np.bincount(z0, minlength=geometry.n_topics) / n_tokens
     n_id = float(share[is_id].sum())
-    print(f"[schlda] init: {n_tokens:,} tokens -> {n_id:.1%} identity, {1 - n_id:.1%} shared")
+    log(f"[schlda] init: {n_tokens:,} tokens -> {n_id:.1%} identity, {1 - n_id:.1%} activity")
     for name, s, i in zip(geometry.topic_names, share, is_id):
         if not i:
-            print(f"[schlda] init:   {name}: {s:.1%}")
+            log(f"[schlda] init:   {name}: {s:.1%}")

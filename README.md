@@ -2,17 +2,18 @@
 
 Hierarchical LDA for annotated single-cell count data.
 
-Every annotated cell type carries its own topic, and a configurable number of
-topics (`V1 … Vn`) are shared by every cell. A cell's counts can only be
-explained by its own type's topic or by the shared ones, so each type's topic
-stays pinned to the annotation and the shared topics are left to pick up
-programs that cut across cell types — cell cycle, interferon response, and so
-on. Any other arrangement — several topics for one type, a topic shared by a
-subset of types, a lineage tree — is a [topic geometry](#topic-geometry).
+Every annotated cell type carries its own **identity topic**, and **activity
+topics** are shared by the cell types that may use them — by default a
+configurable number of topics (`V1 … Vm`) shared by every cell. A cell's counts
+can only be explained by its own type's topic or by the activity topics its
+type is given, so each identity topic stays pinned to the annotation and the
+activity topics are left to pick up programs that cut across cell types — cell
+cycle, interferon response, a lineage program, and so on.
 
 - [Install](#install)
-- [Fit](#fit) · [Output directory](#output-directory) · [Initialisation](#initialisation) · [Sampler settings](#sampler-settings) · [Threads](#threads) · [Theta prior](#theta-prior)
-- [Topic geometry](#topic-geometry)
+- [Fit](#fit) · [Output directory](#output-directory) · [Sampler settings](#sampler-settings) · [Threads](#threads) · [Theta prior](#theta-prior)
+- [Activity topics](#activity-topics)
+- [Samples and the likelihood trace](#samples-and-the-likelihood-trace)
 - [Plot](#plot)
 - [Example](#example) · [Cost](#cost) · [Development](#development) · [Citation](#citation)
 
@@ -33,7 +34,7 @@ adata = sc.read_h5ad("pbmc.h5ad")
 res = schlda.fit_hlda(
     adata,
     "cell_type",            # column in adata.obs holding the annotation
-    n_activity_topics=2,    # shared activity topics V1, V2
+    n_activity_topics=2,    # activity topics V1, V2 shared by every cell
     layer="counts",         # raw counts; defaults to adata.X
     output_dir="results/pbmc",
     seed=0,
@@ -41,9 +42,9 @@ res = schlda.fit_hlda(
 
 res.theta              # cells x topics, rows sum to 1
 res.beta               # genes x topics, columns sum to 1
-res.topics             # topic / node / cell_types / alpha
+res.topics             # topic / kind / cell_types / alpha
 res.identity_topics    # ['B', 'CD4T', ...]  the cell types' own topics
-res.activity_topics    # ['V1', 'V2']        the shared ones
+res.activity_topics    # ['V1', 'V2']
 ```
 
 The counts must be raw integers. Normalised or log-transformed values are
@@ -62,34 +63,24 @@ Use `key_added` to fit several models into one object.
 
 ### Output directory
 
-`output_dir` receives:
+A finished run leaves in `output_dir`:
 
 ```
-HLDA_beta.csv           genes x topics posterior mean
-HLDA_theta.csv          cells x topics posterior mean
-topics.csv              the geometry: topic, node, cell_types, alpha
-alpha_cells.csv         cells x topics prior, only when it varies by cell
-samples/A_chain.memmap  (n_save, n_genes, n_topics) int32 gene-topic counts
-samples/D_chain.memmap  (n_save, n_cells, n_topics) int32 cell-topic counts
-samples/samples_meta.json   shapes, topic names, run parameters
+theta.csv                   cells x topics posterior mean
+beta.csv                    genes x topics posterior mean
+topics.csv                  topic, kind, cell_types, alpha
+params.json                 every setting of the run, the seed, seconds per sweep
+log.txt                     everything the run printed, ending "exit 0" (or the traceback and "exit 1")
+theta_heatmap.png           topics x cells
+activity_theta_heatmap.png  the activity topics only
+structure_plot.png          one stacked bar per cell
+likelihood.csv              only with track_likelihood=True (see below)
+samples/                    only with save_samples=True (see below)
 ```
 
-`topics.csv` can be passed back as `geometry=` to refit the same geometry.
-
-Omitting `output_dir` writes to `./schlda_output` and warns. Reload the chains
-for convergence diagnostics using the shapes in the sidecar:
-
-```python
-import json, numpy as np
-meta = json.load(open("results/pbmc/samples/samples_meta.json"))
-A = np.memmap("results/pbmc/samples/A_chain.memmap", dtype="int32",
-              mode="r", shape=tuple(meta["A_chain"]["shape"]))
-```
-
-### Initialisation
-
-Every token starts on a topic drawn uniformly from those its cell may use;
-`seed` fixes the draw. `burn_in` sweeps are discarded before draws are kept.
+`topics.csv` can be passed back as `activity=` to refit the same geometry.
+Omitting `output_dir` writes to `./schlda_output` and warns; `plots=False`
+skips the three figures.
 
 ### Sampler settings
 
@@ -100,13 +91,16 @@ Every token starts on a topic drawn uniformly from those its cell may use;
 | `thin` | 30 | sweeps between kept draws |
 | `n_threads` | 1 | threads per sweep (see [Threads](#threads)) |
 | `alpha_beta` | 0.1 | Dirichlet concentration on gene distributions |
-| `alpha_identity` | 1.0 | concentration on a cell type's own topics (see [Theta prior](#theta-prior)) |
-| `alpha_activity` | 0.1 | concentration on each shared topic |
-| `alpha` | `None` | per-node / per-topic overrides, or a full array |
+| `alpha_identity` | 1.0 | concentration on every identity topic |
+| `alpha_activity` | 0.1 | concentration on every activity topic |
+| `save_samples` | `False` | write the kept draws to `samples/` |
+| `track_likelihood` | `False` | record log P(w, z) every `report_every` sweeps |
+| `plots` | `True` | write the three figures |
 | `seed` | `None` | seeds init and the chain |
 | `report_every` | 100 | sweeps between progress lines |
 
-Pass `seed` for reproducibility. A run repeats exactly for a fixed `seed` and
+Every token starts on a topic drawn uniformly from those its cell may use;
+`seed` fixes the draw. A run repeats exactly for a fixed `seed` and
 `n_threads`; changing `n_threads` changes the draws.
 
 ### Threads
@@ -129,50 +123,21 @@ res = schlda.fit_hlda(adata, "cell_type", n_activity_topics=2, layer="counts",
 
 ### Theta prior
 
-A cell `i` of type `c` may use the topics `A(c)`: the topics of `c` and of
-every group containing `c`. Its topic usage has the Dirichlet prior
+A cell `i` of type `c` may use the topics `A(c)`: the topic of `c` and the
+activity topics `c` is given. Its topic usage has the Dirichlet prior
 
 ```
 theta_i ~ Dirichlet(alpha_k : k in A(c))
-alpha_k = alpha_identity / n(c)   for each of the n(c) topics of type c
-alpha_k = alpha_activity          for a group's topic
+alpha_k = alpha_identity   for the identity topic of c
+alpha_k = alpha_activity   for each activity topic
 ```
 
-Every concentration — `alpha_identity`, `alpha_activity`, a value set with
-`g.alpha(topic, value)` or passed in the `alpha=` dict — takes one of three
-forms:
-
-| form | `alpha_ik` for cell `i`, topic `k` |
-| --- | --- |
-| a float `a` | `a` for every cell |
-| one value per cell (array, or Series indexed by `adata.obs_names`) | that cell's value |
-| `schlda.depth(kappa)` | `kappa * L_i`, with `L_i` the cell's total counts |
-
-`depth(kappa)` scales the prior with sequencing depth: the pseudo-counts are
-the fraction `kappa` of each cell's own counts (`depth(0.01)` is 1 % of every
-cell's counts), so the prior carries the same share of every cell's evidence
-whatever its depth, instead of a fixed number of pseudo-counts that is strong
-for a shallow cell and negligible for a deep one. When every cell has the
-same depth, `depth(kappa)` is the fixed value `kappa * L`.
-
-`alpha=` overrides single entries: a dict keyed by node or topic, with values
-of the same three forms (a cell type's value is split over its topics like
-`alpha_identity`, a topic name sets that topic), or a full array — `(K,)` per
-topic or `(n_cells, K)` per cell and topic, in the order of `res.topics` — that
-replaces every other setting.
+Each is one positive number applied to all topics of its kind; `res.topics` /
+`topics.csv` record the value on every topic.
 
 ```python
-schlda.fit_hlda(adata, "cell_type", 1, alpha_identity=5.0)
-schlda.fit_hlda(adata, "cell_type", 1, alpha_identity=schlda.depth(0.01))
-schlda.fit_hlda(adata, "cell_type", 2, alpha={"CD4T": 3.0, "V2": schlda.depth(0.001)})
-g = schlda.geometry(adata, "cell_type", 2).alpha("V2", 0.01)
-schlda.fit_hlda(adata, "cell_type", geometry=g)
+schlda.fit_hlda(adata, "cell_type", 1, alpha_identity=5.0, alpha_activity=0.05)
 ```
-
-`res.topics` / `topics.csv` record the `alpha` of every topic (`depth(kappa)`
-written as such, a per-cell value as `per-cell`); a prior that varies by cell
-is also written out as `alpha_cells.csv`, and `res.params["prior"]` is
-`"fixed"` or `"per_cell"`.
 
 The sampler is collapsed: each token's topic is drawn from
 
@@ -184,85 +149,104 @@ with `A` the gene x topic counts, `B` their column sums, `D` the cell x topic
 counts (all excluding the token), and `theta`, `beta` the posterior means over
 the retained sweeps.
 
-## Topic geometry
+## Activity topics
 
-A geometry is a set of **nodes**, each carrying one or more topics. The cell
-types are nodes; a **group** is a node made of several cell types. A cell may
-use the topics of its own type and of every group its type belongs to.
-`n_activity_topics=m` is the geometry with one topic per type and a group `V`
-of every type carrying `V1 … Vm`. Anything else starts from
-`schlda.geometry(adata, "cell_type")` — one topic per type, no groups — and is
-edited in place:
+`n_activity_topics=m` gives `V1 … Vm`, each shared by every cell type. To say
+which activity topics each cell type may use, pass `activity=` instead: a CSV
+file (or DataFrame) with one row per cell type and the topics it may use,
+separated by `;` (blank for none):
 
-| method | effect |
-| --- | --- |
-| `g.topics(node, n)` / `g.topics(node, [names])` | the node carries `n` topics (`<node>` if 1, else `<node>_1 … <node>_n`) or the names given; `0` removes them |
-| `g.group(name, members, n=1)` | a group of cell types (`"all"` or a list of two or more) carrying `n` topics, or `[names]` |
-| `g.drop(topic)` | remove one topic |
-| `g.alpha(topic, value)` | that topic's concentration (default by node, see [Theta prior](#theta-prior)) |
+```
+cell_type,activity_topics
+B,stress; lymphoid
+CD4T,stress; lymphoid; T
+CD8T,stress; lymphoid; T
+NK,stress; lymphoid
+Mono,stress
+```
 
 ```python
-g = schlda.geometry(adata, "cell_type")
-g.topics("CD4T", 2)                                  # CD4T_1, CD4T_2
-g.group("V", "all", 2)                               # V_1, V_2 for every cell
-g.group("lymphoid", ["B", "CD4T", "CD8T", "NK"])     # one topic, lymphocytes only
-g.group("T", ["CD4T", "CD8T"])                       # nested: a sub-branch
+res = schlda.fit_hlda(adata, "cell_type", activity="activity.csv",
+                      layer="counts", output_dir="results/pbmc_tree", seed=0)
+```
+
+Every topic named anywhere in the file becomes an activity topic, shared by
+exactly the cell types that list it; a cell type missing from the file has no
+activity topic. The transposed table — one row per topic, with the cell types
+that share it or `all` — is also accepted, and is the form every fit writes
+out as `topics.csv`:
+
+```
+topic,cell_types
+stress,all
+lymphoid,B; CD4T; CD8T; NK
+T,CD4T; CD8T
+```
+
+Either orientation may be given as a dict instead of a file
+(`{"B": ["stress", "lymphoid"], ...}` or `{"stress": "all", "T": ["CD4T",
+"CD8T"]}`). Topic names must differ from cell type names; the cell types must
+be those of the annotation column. `schlda.geometry(adata, "cell_type",
+activity=...)` builds the geometry without fitting, for a look first:
+
+```python
+g = schlda.geometry(adata, "cell_type", activity="activity.csv")
 print(g.describe())
-# B     (1,231 cells): B, V_1, V_2, lymphoid
-# CD4T  (5,091 cells): CD4T_1, CD4T_2, V_1, V_2, lymphoid, T
-# CD8T  (812 cells): CD8T, V_1, V_2, lymphoid, T
-# NK    (402 cells): NK, V_1, V_2, lymphoid
-# Mono  (2,940 cells): Mono, V_1, V_2
-# groups:
-#   V (V_1, V_2) <- all
-#   lymphoid (lymphoid) <- B; CD4T; CD8T; NK
-#   T (T) <- CD4T; CD8T
-
-res = schlda.fit_hlda(adata, "cell_type", geometry=g, layer="counts",
-                      output_dir="results/pbmc_geo", seed=0)
+# B     (1,231 cells): B, stress, lymphoid
+# CD4T  (5,091 cells): CD4T, stress, lymphoid, T
+# CD8T  (812 cells): CD8T, stress, lymphoid, T
+# NK    (402 cells): NK, stress, lymphoid
+# Mono  (2,940 cells): Mono, stress
+g.to_frame()          # the topics table; g.allowed_frame() the cell type x topic mask
 ```
 
-Groups may nest or overlap, so any DAG over cell types is expressible, each
-level written out. A group of a single cell type is not a group — give that
-type another topic with `g.topics(type, 2)`. `res.identity_topics` are the
-topics carried by cell types and `res.activity_topics` those carried by
-groups; the plots colour them accordingly.
+Topic order is the identity topics (annotation order), then the activity
+topics in the order the file names them.
 
-The same geometry as a table, `g.to_frame()`:
+## Samples and the likelihood trace
 
-| topic | node | cell_types | alpha |
-| --- | --- | --- | --- |
-| B | B | B | |
-| CD4T_1 | CD4T | CD4T | |
-| CD4T_2 | CD4T | CD4T | |
-| CD8T | CD8T | CD8T | |
-| NK | NK | NK | |
-| Mono | Mono | Mono | |
-| V_1 | V | all | |
-| V_2 | V | all | |
-| lymphoid | lymphoid | B; CD4T; CD8T; NK | |
-| T | T | CD4T; CD8T | |
+By default only the posterior means are kept. `save_samples=True` also writes
+the kept draws of the count tables to `samples/`:
 
-An empty `alpha` means the node's default. The table can be edited as a
-DataFrame or CSV and passed as `geometry=` to `fit_hlda` (or
-`table=` to `schlda.geometry`), and every fit writes its own as `topics.csv`
-with the `alpha` values used. The dict shortcuts build the same thing:
+```
+samples/A_chain.memmap      (n_save, n_genes, n_topics) int32 gene-topic counts
+samples/D_chain.memmap      (n_save, n_cells, n_topics) int32 cell-topic counts
+samples/samples_meta.json   shapes, topic names and types, run parameters
+samples/allowed.npy, cell_node.npy   the cell type x topic mask and each cell's type
+```
 
 ```python
-schlda.geometry(adata, "cell_type",
-                topics={"CD4T": 2},
-                groups={"V": ("all", 2), "lymphoid": ["B", "CD4T", "CD8T", "NK"]})
+import json, numpy as np
+meta = json.load(open("results/pbmc/samples/samples_meta.json"))
+A = np.memmap("results/pbmc/samples/A_chain.memmap", dtype="int32",
+              mode="r", shape=tuple(meta["A_chain"]["shape"]))
 ```
 
-Topic order is the cell types' topics (annotation order), then each group's
-in the order added. Topic and node names must be unique, every cell type needs
-at least one topic it may use, and the geometry's cell types must be those of
-the column the fit conditions on (`res.allowed` is the derived cell type x
-topic mask).
+`track_likelihood=True` records, every `report_every` sweeps from the first,
+the collapsed joint log-likelihood of the tokens and their current assignments
+with `theta` and `beta` integrated out,
 
-`examples/vignette.py` fits a lineage tree — lymphoid and myeloid branches,
-each with a shared topic, plus a topic for every cell (3c) — and a label
-hiding two cell states, which a second topic for that label resolves (3e).
+```
+log P(w, z) = sum_k [ lnΓ(G η) − lnΓ(G η + B_k) + sum_g (lnΓ(η + A_gk) − lnΓ(η)) ]
+            + sum_i [ lnΓ(a_i) − lnΓ(a_i + L_i) + sum_k (lnΓ(alpha_k + D_ik) − lnΓ(alpha_k)) ]
+```
+
+(`η` = `alpha_beta`, `L_i` the cell's counts, `a_i` the sum of `alpha_k` over
+the topics cell `i` may use), to `likelihood.csv` as `sweep, loglik_joint`. It
+is the quantity the sampler moves on and is for watching one chain settle; it
+is not the marginal likelihood `P(w)` and is not comparable across runs with
+different priors or geometries. The cost is a histogram of the count tables,
+negligible next to a sweep.
+
+`likelihood_curve` draws it:
+
+```python
+schlda.likelihood_curve("results/pbmc")    # -> likelihood.csv, likelihood.png
+```
+
+It reads `likelihood.csv` when the run tracked it, and otherwise computes the
+same quantity from `samples/` — then only the kept, post-burn-in draws are
+available, so the curve starts after `burn_in`. A run with neither raises.
 
 ## Plot
 
@@ -274,7 +258,8 @@ schlda.theta_heatmap(res, cells_per_group=10, save="heatmap.pdf")
 `structure_plot` draws one stacked bar per cell, grouped by cell type.
 `theta_heatmap` draws topics as rows and cells as columns, optionally averaging
 runs of `cells_per_group` cells into meta-cells to stay legible on large
-datasets. Both return `(fig, ax)`.
+datasets. Both return `(fig, ax)`. Every fit writes both (and the activity
+topics alone) to its output directory.
 
 ### Any theta, any method
 
@@ -345,14 +330,9 @@ Other knobs: `topic_order`, `group_order`, `colors`, `max_cells_per_group`,
 
 `examples/vignette.py` simulates five cell types in two lineage branches,
 each branch with a shared program, plus a stress program active in every type;
-fits the default geometry and the lineage tree (3c); shows the fixed,
-depth-scaled and array forms of the theta prior (3d); then two situations met
-in practice — a label that hides two cell states, resolved by giving that
-label a second topic (3e), and an activity program that modulates the cell's
-own program, where the identity prior decides what the shared topic holds and
-`depth(kappa)` applies it evenly across sequencing depths (3f) — and draws the
-fits next to the simulation truth on shared cell orders. It runs in a few
-minutes:
+fits the default geometry and the lineage geometry from a flat file (3c);
+saves samples and the likelihood trace (3d); and draws the fits next to the
+simulation truth on shared cell orders. It runs in a couple of minutes:
 
 ```bash
 python examples/vignette.py vignette_out
@@ -362,7 +342,9 @@ python examples/vignette.py vignette_out
 
 The sampler works on one token per UMI, so memory scales with total counts, not
 with cells x genes: roughly 16 bytes per UMI. A dataset with 50M total counts
-needs about 800 MB for the token arrays. Runtime scales with tokens x sweeps.
+needs about 800 MB for the token arrays. Runtime scales with tokens x sweeps;
+the posterior means are accumulated as the chain runs, so a fit ends as soon as
+the last sweep does.
 
 ## Development
 

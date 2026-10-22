@@ -1,5 +1,34 @@
 # Changelog
 
+## 1.0.0 — 2026-10-22
+
+- Two kinds of topic only: one identity topic per annotated cell type, and
+  activity topics shared by the cell types that may use them. The default is
+  still `n_activity_topics=m` (`V1 .. Vm` for every cell); any other sharing
+  is given as `activity=` — a CSV / DataFrame with columns `cell_type,
+  activity_topics` (`;`-separated, blank for none) or `topic, cell_types`
+  (`all` or `;`-separated), or a dict in either orientation. Removed:
+  `schlda.geometry(...).topics / group / drop / alpha`, identity sub-topics,
+  nested groups, `geometry=`, `TopicGeometry` (now `Geometry`, read-only).
+- Two prior values only: `alpha_identity` (default 1) on every identity topic
+  and `alpha_activity` (default 0.1) on every activity topic. Removed:
+  `depth(kappa)`, per-cell arrays, the `alpha=` dict / array, `alpha_cells.csv`.
+- A finished run writes `theta.csv`, `beta.csv` (were `HLDA_theta.csv`,
+  `HLDA_beta.csv`), `topics.csv` (columns `topic, kind, cell_types, alpha`),
+  `params.json`, `log.txt` (everything printed, ending `exit 0` or the
+  traceback and `exit 1`), `theta_heatmap.png`, `activity_theta_heatmap.png`
+  and `structure_plot.png` (`plots=False` skips them).
+- Posterior means are accumulated during the run; the kept draws are written
+  to `samples/` only with `save_samples=True` (default off). `samples/` gains
+  `topic_types` in the sidecar plus `allowed.npy` and `cell_node.npy`.
+- `track_likelihood=True` records the collapsed joint log-likelihood
+  `log P(w, z)` every `report_every` sweeps in `likelihood.csv`;
+  `schlda.likelihood_curve(output_dir)` draws `likelihood.png` from it, or
+  computes it from `samples/` when the run did not track it.
+- `init` is accepted only as `"random"` (kept for old call sites).
+- Default fits reproduce 0.9.0 exactly (golden tests unchanged).
+- README and vignette rewritten around these features.
+
 ## 0.9.0 — 2026-10-14
 
 - Theta prior: every concentration (`alpha_identity`, `alpha_activity`,

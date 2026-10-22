@@ -56,7 +56,7 @@ def open_chains(sample_dir, n_save, n_genes, n_cells, K, mode="w+"):
     return A_chain, D_chain
 
 
-def write_sample_metadata(sample_dir, n_save, n_genes, n_cells, K, topic_names, params):
+def write_sample_metadata(sample_dir, n_save, n_genes, n_cells, K, topic_names, topic_types, params):
     """Sidecar recording the memmap shapes, so readers need not re-derive them."""
     meta = {
         "dtype": "int32",
@@ -67,27 +67,8 @@ def write_sample_metadata(sample_dir, n_save, n_genes, n_cells, K, topic_names, 
         "A_chain": {"file": "A_chain.memmap", "shape": [int(n_save), int(n_genes), int(K)]},
         "D_chain": {"file": "D_chain.memmap", "shape": [int(n_save), int(n_cells), int(K)]},
         "topic_names": list(topic_names),
+        "topic_types": list(topic_types),
         "params": params,
     }
     with open(Path(sample_dir) / "samples_meta.json", "w") as fh:
         json.dump(meta, fh, indent=2)
-
-
-def posterior_means(A_chain, D_chain, n_save, gene_names, cell_names, topic_names):
-    """Posterior mean beta (genes x K) and theta (cells x K) from the saved chains."""
-    beta_sum = np.zeros(A_chain.shape[1:], dtype=np.float64)
-    theta_sum = np.zeros(D_chain.shape[1:], dtype=np.float64)
-    for idx in range(n_save):
-        beta_sum += A_chain[idx]
-        theta_sum += D_chain[idx]
-
-    # A topic that never wins a token, or a cell with no tokens, would give 0/0;
-    # leave those as exact zeros instead of NaN.
-    beta_norm = beta_sum.sum(axis=0, keepdims=True)
-    theta_norm = theta_sum.sum(axis=1, keepdims=True)
-    beta = beta_sum / np.where(beta_norm == 0, 1.0, beta_norm)
-    theta = theta_sum / np.where(theta_norm == 0, 1.0, theta_norm)
-
-    beta_df = pd.DataFrame(beta, index=pd.Index(gene_names), columns=list(topic_names))
-    theta_df = pd.DataFrame(theta, index=pd.Index(cell_names), columns=list(topic_names))
-    return beta_df, theta_df
