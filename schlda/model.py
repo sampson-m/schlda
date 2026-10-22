@@ -8,7 +8,6 @@ collapsed Gibbs sampler.
 from __future__ import annotations
 
 import json
-import sys
 import time
 import traceback
 import warnings

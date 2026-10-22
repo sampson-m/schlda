@@ -11,7 +11,6 @@ import json
 from pathlib import Path
 
 import numpy as np
-import pandas as pd
 
 
 def expand_tokens(counts, cell_identity_ints):
